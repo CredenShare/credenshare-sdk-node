@@ -55,6 +55,14 @@ export class CredentialFormatError extends CredenShareError {}
  */
 export class CustodySecretTransmittedError extends CredenShareError {}
 
+/**
+ * A field object is not shaped the way the wire format requires.
+ *
+ * Its own class rather than a TypeError so that a blanket `catch (e) { if (e instanceof
+ * CredenShareError) ... }` — the pattern the README teaches — actually catches it.
+ */
+export class InvalidFieldError extends CredenShareError {}
+
 export interface ApiErrorInit {
   status?: number
   code?: number
@@ -137,3 +145,45 @@ export class IdempotencyConflictError extends ApiError {}
  * healthy one during a billing hiccup.
  */
 export class ServiceUnavailableError extends ApiError {}
+
+/**
+ * The API could not be reached at all. Nothing was sent, so nothing was created.
+ *
+ * Distinct from {@link ServiceUnavailableError}, which is a real HTTP 503 — an answer from
+ * the API rather than the absence of one.
+ */
+export class NetworkError extends CredenShareError {
+  /** How many delivery attempts were made before giving up. */
+  readonly attempts: number
+
+  constructor(message: string, attempts: number) {
+    super(message)
+    this.attempts = attempts
+  }
+}
+
+/**
+ * The request was delivered but no response could be read, so its outcome is unknown.
+ *
+ * A create that throws this may have produced a share whose link this process never saw.
+ * Do NOT retry with a fresh idempotency key — that is how one secret becomes two, each with
+ * its own link and audit trail. Repeat the identical request so the API can recognise it,
+ * or reconcile by listing before retrying.
+ */
+export class DeliveryUnknownError extends CredenShareError {
+  /** How many delivery attempts were made before giving up. */
+  readonly attempts: number
+
+  constructor(message: string, attempts: number) {
+    super(message)
+    this.attempts = attempts
+  }
+}
+
+/**
+ * An identical request is already in flight (error code 106).
+ *
+ * The first call has not finished. Wait briefly and repeat the byte-identical request —
+ * changing the key or the body turns this into a duplicate rather than a retry.
+ */
+export class IdempotencyInFlightError extends ApiError {}

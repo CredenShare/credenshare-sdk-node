@@ -37,9 +37,9 @@
     "build": "tsc -p tsconfig.build.json && node scripts/copy-vectors.mjs",
     "test": "node scripts/run-tests.mjs",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src test",
     "conformance": "node --import tsx src/conformance-cli.ts -v",
-    "prepublishOnly": "npm run build && npm test"
+    "prepare": "npm run build",
+    "prepublishOnly": "npm test"
   },
   "keywords": [
     "credenshare",

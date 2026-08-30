@@ -6,6 +6,8 @@
  * that matter.
  */
 
+import { CredenShareError } from './errors.js'
+
 export const SIGNATURE_HEADER = 'X-CredenShare-Signature'
 
 /**
@@ -19,7 +21,7 @@ export const SIGNATURE_HEADER = 'X-CredenShare-Signature'
 export const DEFAULT_TOLERANCE_SECONDS = 300
 
 /** A delivery did not verify. Treat it as a forgery, not as a transient error. */
-export class WebhookVerificationError extends Error {
+export class WebhookVerificationError extends CredenShareError {
   constructor(message: string) {
     super(message)
     this.name = 'WebhookVerificationError'
@@ -121,6 +123,18 @@ export async function verify(
   )
   if (candidates.length === 0) {
     throw new WebhookVerificationError('no signing secret was supplied')
+  }
+  // The filter above accepts a secret that only LOOKS non-empty after trimming, while the
+  // HMAC below keys with the untrimmed bytes. A secret read from a file or an env var with a
+  // trailing newline then fails every delivery, and the message blames the signature rather
+  // than the whitespace - which is where the hours go.
+  const untrimmed = candidates.find((s) => s !== s.trim())
+  if (untrimmed !== undefined) {
+    throw new WebhookVerificationError(
+      'a signing secret has leading or trailing whitespace (probably a trailing newline ' +
+        'from a file or an environment variable). The HMAC is keyed with the exact bytes, ' +
+        'so this would fail every delivery. Trim it at the source.',
+    )
   }
 
   const { timestamp, signatures } = parseHeader(header)

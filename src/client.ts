@@ -13,7 +13,11 @@ import {
   AuthenticationError,
   CredentialFormatError,
   CustodySecretTransmittedError,
+  DeliveryUnknownError,
   IdempotencyConflictError,
+  IdempotencyInFlightError,
+  MalformedKeyError,
+  NetworkError,
   NotFoundError,
   PermissionError,
   QuotaExceededError,
@@ -38,6 +42,9 @@ const QUOTA_EXCEEDED_CODE = 61
 
 /** The API's numeric code for an Idempotency-Key replayed with a different body. */
 const IDEMPOTENCY_CONFLICT_CODE = 105
+
+/** The identical request is still in flight. Wait and repeat it; do not change the key. */
+const IDEMPOTENCY_IN_FLIGHT_CODE = 106
 
 /**
  * Retries for network failures. Only connection and timeout errors are retried, never an
@@ -123,6 +130,25 @@ export class Credential {
     return (await crypto.custodyKeypair(this.#custodySecret)).publicKeyB64url
   }
 
+  /**
+   * Wrap a payload to this credential's own custody public key.
+   *
+   * Done here rather than by handing the secret out, because the custody secret is the one
+   * value in this class that must never leave it: it is what the server deliberately cannot
+   * hold, and an accessor is all it takes for it to end up somewhere that logs.
+   */
+  async wrapToCustody(payload: Uint8Array): Promise<string> {
+    if (this.#custodySecret === undefined) {
+      throw new CredentialFormatError(
+        'custody needs a three-part credential ' +
+          "'crs_sk_live_<keyId>.<authSecret>.<custodySecret>'; this one has two parts, so " +
+          'there is no custody key to wrap to',
+      )
+    }
+    const keypair = await crypto.custodyKeypair(this.#custodySecret)
+    return crypto.wrapToPublicKey(payload, keypair.publicKeyRaw)
+  }
+
   /** Never render the secrets. A credential in a log line is a credential that must be rotated. */
   toJSON(): string {
     return `<Credential ${this.keyId} (${this.hasCustody ? 'with custody' : 'no custody'})>`
@@ -133,18 +159,70 @@ export class Credential {
   }
 }
 
-/** A created share, and the only place its link exists. */
-export interface Share {
-  shortCode: string
+/**
+ * A created share, and the only place its link exists.
+ *
+ * This is a class rather than a plain object so that printing it does not print the key.
+ * `link` carries the content key in its fragment, so an object literal turns any incidental
+ * `console.log(share)`, structured-logger call or `JSON.stringify` into a permanent
+ * plaintext record of the secret in a log aggregator. The properties are still there and
+ * still readable — you have to ask for them by name.
+ */
+export class Share {
+  readonly shortCode: string
   /**
    * The full recipient link, INCLUDING the key fragment. Treat this as the secret itself:
    * anyone holding it can read the content, and CredenShare cannot.
    */
-  link: string
+  readonly link: string
   /** The content key, if you need to build your own link or decrypt later. */
-  contentKey: Uint8Array
-  expiredAt?: string | null
-  custody?: string | null
+  readonly contentKey: Uint8Array
+  readonly expiredAt: string | null
+  readonly custody: string | null
+  /**
+   * The Idempotency-Key this create was sent with, generated when you did not supply one.
+   *
+   * Surfaced because the documented recovery from an uncertain outcome is to repeat the
+   * identical request with the same key — which is impossible for a key you were never told.
+   */
+  readonly idempotencyKey: string
+
+  constructor(init: {
+    shortCode: string
+    link: string
+    contentKey: Uint8Array
+    expiredAt?: string | null
+    custody?: string | null
+    idempotencyKey: string
+  }) {
+    this.shortCode = init.shortCode
+    this.link = init.link
+    this.contentKey = init.contentKey
+    this.expiredAt = init.expiredAt ?? null
+    this.custody = init.custody ?? null
+    this.idempotencyKey = init.idempotencyKey
+  }
+
+  /** Redacted. The link and the key are omitted on purpose. */
+  toJSON(): Record<string, unknown> {
+    return {
+      shortCode: this.shortCode,
+      expiredAt: this.expiredAt,
+      custody: this.custody,
+      idempotencyKey: this.idempotencyKey,
+      link: '[redacted - contains the content key]',
+      contentKey: '[redacted]',
+    }
+  }
+
+  toString(): string {
+    return `Share(${this.shortCode}, link redacted)`
+  }
+
+  /** Node's console.log / util.inspect path, which ignores toJSON. */
+  [Symbol.for('nodejs.util.inspect.custom')](): string {
+    return this.toString()
+  }
 }
 
 /**
@@ -195,6 +273,18 @@ export interface CreateOptions {
    * or a fixed key in a test. It does not make the request body reproducible.
    */
   contentKey?: Uint8Array
+  /**
+   * Also wrap the content key to the custody public key derived from your credential's third
+   * part, so the share is readable from the dashboard later.
+   *
+   * Without this an API-created share is custody `"none"`: the link is the only way back to
+   * the content, and losing it loses the secret. The custody secret is used locally to derive
+   * a public key and is never transmitted.
+   */
+  custody?: boolean
+  /** A wrap you computed yourself. Mutually exclusive with `custody`. */
+  itemKeyWrap?: string
+  organizationId?: string
 }
 
 export interface ClientOptions {
@@ -286,10 +376,12 @@ export class CredenShare {
     if (body !== undefined) headers['Content-Type'] = 'application/json'
 
     let attempt = 0
+    let delivered = false
     for (;;) {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), this.#timeoutMs)
       let response: Response
+      let text: string
       try {
         response = await this.#fetch(url.toString(), {
           method,
@@ -297,12 +389,29 @@ export class CredenShare {
           body,
           signal: controller.signal,
         })
+        // Headers arrived: the request was delivered and the server may have committed.
+        // That is a different answer from never reaching it, and the difference decides
+        // whether a caller may safely retry.
+        delivered = true
+        // Read the body inside the guarded region. With the read outside it, the timeout
+        // covers only the headers, so a server that responds and then stalls mid-body
+        // hangs this call forever — the one failure a timeout exists to prevent.
+        text = await response.text()
       } catch (error) {
         // Retry only the failures that prove nothing was received. A 5xx might have
         // committed and this client cannot tell, so it is surfaced rather than repeated.
         if (attempt >= this.#maxRetries) {
-          throw new ServiceUnavailableError(
-            `could not reach the API after ${attempt + 1} attempt(s): ${String(error)}`,
+          const attempts = attempt + 1
+          if (delivered) {
+            throw new DeliveryUnknownError(
+              `the request was delivered but no response was read after ${attempts} ` +
+                `attempt(s): ${String(error)}`,
+              attempts,
+            )
+          }
+          throw new NetworkError(
+            `could not reach the API after ${attempts} attempt(s): ${String(error)}`,
+            attempts,
           )
         }
         // Plain exponential backoff, no jitter: the retry count is 2 by default, so a
@@ -314,7 +423,6 @@ export class CredenShare {
         clearTimeout(timer)
       }
 
-      const text = await response.text()
       let parsed: ApiPayload = {}
       if (text) {
         try {
@@ -345,6 +453,24 @@ class Shares {
    */
   async create(options: CreateOptions): Promise<Share> {
     const contentKey = options.contentKey ?? crypto.newContentKey()
+    // Check the key before anything is encrypted or sent. The only length check used to live
+    // in encodeFragment, which runs AFTER the share exists on the server — so a wrong-length
+    // key created a real share holding a real secret and then threw, losing the short code.
+    // The caller could neither find it nor expire it.
+    if (contentKey.length !== crypto.CONTENT_KEY_LENGTH) {
+      throw new MalformedKeyError(
+        `a content key is ${crypto.CONTENT_KEY_LENGTH} bytes; this one is ${contentKey.length}`,
+      )
+    }
+    if (options.custody && options.itemKeyWrap !== undefined) {
+      throw new MalformedKeyError('pass either custody or itemKeyWrap, not both')
+    }
+
+    let itemKeyWrap = options.itemKeyWrap
+    if (options.custody) {
+      itemKeyWrap = await this.#client.credential.wrapToCustody(contentKey)
+    }
+
     const blob = await crypto.encryptContent(contentKey, options.fields, {
       passcode: options.passcode,
     })
@@ -362,21 +488,25 @@ class Shares {
     if (options.expiredAt !== undefined) body.expired_at = options.expiredAt
     if (options.accessCountsLeft !== undefined) body.access_counts_left = options.accessCountsLeft
     if (options.timedView !== undefined) body.timed_view = options.timedView
+    if (itemKeyWrap !== undefined) body.item_key_wrap = itemKeyWrap
+    if (options.organizationId !== undefined) body.organization_id = options.organizationId
 
     // Required by the API, not optional. A retried automation must not create a second copy
     // of a credential in the world, with its own link and audit trail, that the caller does
     // not know exists.
-    const headers = { 'Idempotency-Key': options.idempotencyKey ?? globalThis.crypto.randomUUID() }
+    const idempotencyKey = options.idempotencyKey ?? globalThis.crypto.randomUUID()
+    const headers = { 'Idempotency-Key': idempotencyKey }
 
     const data = await this.#client.request('POST', '/shares', { body, headers })
     const shortCode = String(data.short_code)
-    return {
+    return new Share({
       shortCode,
       link: this.#client.linkFor(shortCode, contentKey),
       contentKey,
       expiredAt: (data.expired_at as string | null) ?? null,
       custody: (data.custody as string | null) ?? null,
-    }
+      idempotencyKey,
+    })
   }
 
   /**
@@ -401,7 +531,11 @@ class Shares {
       limit: pagination.limit ?? limit,
       total: pagination.total,
       totalPages,
-      hasMore: totalPages === undefined ? false : resolvedPage < totalPages,
+      // When the server omits total_pages, fall back to a full-page heuristic rather
+      // than to false. Reporting "no more" on a full page is what makes iterateAll()
+      // stop after page one and silently return a fraction of the account — the exact
+      // truncation this type exists to prevent.
+      hasMore: totalPages === undefined ? rows.length >= limit : resolvedPage < totalPages,
     }
   }
 
@@ -472,27 +606,51 @@ function errorFor(response: Response, payload: ApiPayload, text: string): ApiErr
     case 403:
       // A spent allowance is a 403 like a missing scope, but the remedies are opposite: one
       // needs a plan change, the other a different key. The numeric code separates them.
-      return code === QUOTA_EXCEEDED_CODE
-        ? new QuotaExceededError(message, init)
-        : new PermissionError(message, init)
+      if (code === QUOTA_EXCEEDED_CODE) return new QuotaExceededError(message, init)
+      // A revoked or unknown key never reaches the application: API Gateway denies it and
+      // answers 403 with no error_code and no message of ours. Reporting that as
+      // PermissionError sends the reader to check scopes on a key that no longer exists,
+      // and made AuthenticationError unreachable in practice despite the README listing it.
+      if (code === undefined && typeof payload.message !== 'string') {
+        return new AuthenticationError(message, init)
+      }
+      return new PermissionError(message, init)
     case 404:
       return new NotFoundError(message, init)
     case 409:
-      return code === IDEMPOTENCY_CONFLICT_CODE
-        ? new IdempotencyConflictError(message, init)
-        : new ApiError(message, init)
+      if (code === IDEMPOTENCY_CONFLICT_CODE) return new IdempotencyConflictError(message, init)
+      // 106 is not a conflict: the identical request is still running. The remedy is to wait
+      // and repeat the SAME request, where a conflict means the body genuinely differed.
+      if (code === IDEMPOTENCY_IN_FLIGHT_CODE) return new IdempotencyInFlightError(message, init)
+      return new ApiError(message, init)
     case 429: {
+      // Retry-After is a delta-seconds value OR an HTTP-date (RFC 9110). Reading only the
+      // digits form leaves retryAfter undefined for the date form, and the README tells the
+      // caller to wait that many seconds - which is a zero-length wait straight back into
+      // the limit.
       const header = response.headers.get('retry-after')
-      return new RateLimitError(message, {
-        ...init,
-        retryAfter: header && /^\d+$/.test(header) ? Number(header) : undefined,
-      })
+      return new RateLimitError(message, { ...init, retryAfter: retryAfterSeconds(header) })
     }
     case 503:
       return new ServiceUnavailableError(message, init)
     default:
       return new ApiError(message, init)
   }
+}
+
+/**
+ * Retry-After as whole seconds, accepting both RFC 9110 forms.
+ *
+ * Returns undefined rather than 0 for an unreadable header: a caller who waits `undefined`
+ * seconds notices, where one who waits 0 hammers the endpoint that just rate-limited them.
+ */
+function retryAfterSeconds(header: string | null): number | undefined {
+  if (!header) return undefined
+  const trimmed = header.trim()
+  if (/^\d+$/.test(trimmed)) return Number(trimmed)
+  const at = Date.parse(trimmed)
+  if (Number.isFinite(at)) return Math.max(0, Math.ceil((at - Date.now()) / 1000))
+  return undefined
 }
 
 function userAgent(): string {

@@ -26,7 +26,12 @@
  * exactly the ones that do not have it.
  */
 
-import { MalformedKeyError, MissingKeyError, WireFormatError } from './errors.js'
+import {
+  InvalidFieldError,
+  MalformedKeyError,
+  MissingKeyError,
+  WireFormatError,
+} from './errors.js'
 
 /** Field types the recipient view knows how to render (section 2.2.1). */
 export const FIELD_TYPES = [
@@ -57,6 +62,9 @@ const SALT_LEN = 16
 const IV_LEN = 12
 const TAG_LEN = 16
 const KEY_LEN = 32
+
+/** A content key is 32 bytes. Exported so callers can check one before using it. */
+export const CONTENT_KEY_LENGTH = KEY_LEN
 const PUBKEY_LEN = 65 // 0x04 || X(32) || Y(32)
 const WRAP_VERSION = 1
 
@@ -240,23 +248,23 @@ async function contentKeyFor(
 export function validateFields(fields: readonly Field[]): void {
   fields.forEach((field, index) => {
     if (typeof field !== 'object' || field === null || Array.isArray(field)) {
-      throw new TypeError(`field ${index} is not an object`)
+      throw new InvalidFieldError(`field ${index} is not an object`)
     }
     if (!('key' in field)) {
       for (const wrong of ['label', 'name', 'title']) {
         if (wrong in field) {
-          throw new TypeError(
+          throw new InvalidFieldError(
             `field ${index} uses ${JSON.stringify(wrong)} for its label; the member is 'key'. ` +
               `${JSON.stringify(wrong)} is silently ignored, and the field would render with ` +
               'a blank label and no error.',
           )
         }
       }
-      throw new TypeError(`field ${index} has no 'key' (its visible label)`)
+      throw new InvalidFieldError(`field ${index} has no 'key' (its visible label)`)
     }
-    if (!('value' in field)) throw new TypeError(`field ${index} has no 'value'`)
+    if (!('value' in field)) throw new InvalidFieldError(`field ${index} has no 'value'`)
     if (!('type' in field)) {
-      throw new TypeError(`field ${index} has no 'type'; one of ${FIELD_TYPES.join(', ')}`)
+      throw new InvalidFieldError(`field ${index} has no 'type'; one of ${FIELD_TYPES.join(', ')}`)
     }
   })
 }

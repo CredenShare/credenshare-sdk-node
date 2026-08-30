@@ -5,10 +5,18 @@
  * what makes "we cannot read your data" a property of the system rather than a promise.
  */
 
-export { CredenShare, Credential, DEFAULT_BASE_URL, DEFAULT_LINK_ORIGIN } from './client.js'
-export type { ClientOptions, CreateOptions, Share, SharePage, ShareSummary } from './client.js'
+export {
+  CredenShare,
+  Credential,
+  DEFAULT_BASE_URL,
+  DEFAULT_LINK_ORIGIN,
+  DEFAULT_MAX_RETRIES,
+  Share,
+} from './client.js'
+export type { ClientOptions, CreateOptions, SharePage, ShareSummary } from './client.js'
 
 export {
+  CONTENT_KEY_LENGTH,
   FIELD_TYPES,
   accessToken,
   custodyKeypair,
@@ -31,7 +39,11 @@ export {
   CredenShareError,
   CredentialFormatError,
   CustodySecretTransmittedError,
+  DeliveryUnknownError,
   IdempotencyConflictError,
+  IdempotencyInFlightError,
+  InvalidFieldError,
+  NetworkError,
   MalformedKeyError,
   MissingKeyError,
   NotFoundError,

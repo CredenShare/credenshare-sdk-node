@@ -220,7 +220,13 @@ fixes:
 | `QuotaExceededError` | the plan's share allowance is spent | waiting does not help — expire old shares or change plan |
 | `IdempotencyConflictError` | a key was replayed with a different body | expected on a caller-level replay; see above |
 | `RateLimitError` | too many requests | wait `err.retryAfter` seconds |
-| `ServiceUnavailableError` | entitlements could not be resolved | nothing was created; retry |
+| `ServiceUnavailableError` | a real HTTP 503; entitlements could not be resolved | nothing was created; retry |
+| `NetworkError` | the API was never reached | nothing was sent. `err.attempts` says how many tries |
+| `DeliveryUnknownError` | delivered, but no response was read | it may have committed. Repeat the identical request — a fresh key here is how one secret becomes two |
+| `IdempotencyInFlightError` | the identical request is still running | wait briefly, then repeat it unchanged |
+| `InvalidFieldError` | a field is not `{ key, value, type }` | `key` is the visible label — not `label`, `name` or `title` |
+| `NotFoundError` | no such share, or not yours | a code from another account reads exactly like one that never existed |
+| `ApiError` | any other refusal | the base class — `err.status`, `err.code`, `err.requestId` carry the detail |
 
 ## Licence
 

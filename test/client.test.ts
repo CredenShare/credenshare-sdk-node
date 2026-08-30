@@ -8,6 +8,7 @@
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
+import { inspect } from 'node:util'
 
 import { CredenShare, Credential } from '../src/client.js'
 import * as crypto from '../src/crypto.js'
@@ -15,7 +16,10 @@ import {
   ApiError,
   AuthenticationError,
   CredentialFormatError,
+  DeliveryUnknownError,
   IdempotencyConflictError,
+  MalformedKeyError,
+  NetworkError,
   NotFoundError,
   PermissionError,
   QuotaExceededError,
@@ -347,7 +351,9 @@ describe('retries', () => {
     assert.equal(requests.length, 1)
   })
 
-  it('bounds retries and surfaces them as unavailable', async () => {
+  it('bounds retries and reports that nothing was ever sent', async () => {
+    // NetworkError, not ServiceUnavailableError. A 503 is an answer from the API; this is
+    // the absence of one, and only the first tells you the API decided anything.
     let attempts = 0
     const fetchImpl = (async () => {
       attempts += 1
@@ -356,8 +362,101 @@ describe('retries', () => {
 
     await assert.rejects(
       () => new CredenShare(CREDENTIAL, { fetch: fetchImpl, maxRetries: 1 }).shares.list(),
-      ServiceUnavailableError,
+      NetworkError,
     )
     assert.equal(attempts, 2)
+  })
+
+  it('separates a delivered request whose body never arrived', async () => {
+    // Headers arrived, so the server may have committed. Reporting that as "nothing was
+    // created" is what makes a caller retry with a fresh key and end up with two secrets.
+    let attempts = 0
+    const fetchImpl = (async () => {
+      attempts += 1
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new Error('connection reset mid-body'))
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    }) as unknown as typeof globalThis.fetch
+
+    await assert.rejects(
+      () => new CredenShare(CREDENTIAL, { fetch: fetchImpl, maxRetries: 1 }).shares.list(),
+      DeliveryUnknownError,
+    )
+    assert.equal(attempts, 2)
+  })
+
+  it('refuses a wrong-length content key before anything reaches the network', async () => {
+    // The only length check used to be in encodeFragment, which runs after the POST: the
+    // share existed on the server, holding a real secret, and the caller lost its short code.
+    const { requests, fetchImpl } = recorder({
+      status: 201,
+      body: { short_code: 'aB3dEf12' },
+    })
+    await assert.rejects(
+      () =>
+        client(fetchImpl).shares.create({
+          title: 't',
+          fields: [FIELD],
+          contentKey: new Uint8Array(16),
+        }),
+      MalformedKeyError,
+    )
+    assert.equal(requests.length, 0, 'no request may be made for a key that cannot work')
+  })
+
+  it('does not print the link or the key when logged', async () => {
+    const { fetchImpl } = recorder({ status: 201, body: { short_code: 'aB3dEf12' } })
+    const share = await client(fetchImpl).shares.create({ title: 't', fields: [FIELD] })
+
+    const fragment = share.link.split('#')[1]
+    assert.ok(fragment && fragment.length > 10)
+    for (const rendered of [
+      String(share),
+      JSON.stringify(share),
+      inspect(share),
+      inspect({ share }),
+    ]) {
+      assert.ok(!rendered.includes(fragment), `the key fragment leaked into ${rendered}`)
+    }
+    // The properties are still reachable by name - this redacts rendering, not access.
+    assert.ok(share.link.includes('#'))
+    assert.equal(share.contentKey.length, 32)
+  })
+
+  it('surfaces the idempotency key it generated', async () => {
+    const { requests, fetchImpl } = recorder({ status: 201, body: { short_code: 'aB3dEf12' } })
+    const share = await client(fetchImpl).shares.create({ title: 't', fields: [FIELD] })
+
+    // The documented recovery is to repeat the identical request with the same key, which
+    // is impossible for a key the caller was never told.
+    assert.equal(typeof share.idempotencyKey, 'string')
+    assert.equal(requests[0].headers['idempotency-key'], share.idempotencyKey)
+  })
+
+  it('keeps paging when the server omits total_pages', async () => {
+    // Treating an absent pagination block as "no more" made iterateAll return page one and
+    // stop, silently reporting a fraction of the account as all of it.
+    const pages = [
+      { shares: [{ short_code: 'a' }, { short_code: 'b' }] },
+      { shares: [{ short_code: 'c' }] },
+    ]
+    let call = 0
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify(pages[Math.min(call++, pages.length - 1)]), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof globalThis.fetch
+
+    const seen: string[] = []
+    const shares = new CredenShare(CREDENTIAL, { fetch: fetchImpl }).shares
+    for await (const summary of shares.iterateAll({ limit: 2 })) {
+      seen.push(summary.shortCode)
+    }
+    assert.deepEqual(seen, ['a', 'b', 'c'])
   })
 })
