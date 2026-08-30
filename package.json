@@ -27,7 +27,8 @@
     "dist",
     "README.md",
     "LICENSE",
-    "NOTICE"
+    "NOTICE",
+    "CRYPTO_WIRE_SPEC.md"
   ],
   "engines": {
     "node": ">=20"
