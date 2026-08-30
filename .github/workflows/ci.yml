@@ -137,4 +137,4 @@ jobs:
           npm init -y >/dev/null
           npm install "$GITHUB_WORKSPACE/$TARBALL"
           node node_modules/@credenshare/sdk/dist/conformance-cli.js -v
-          echo "fa4011ffbd4f45e534117bbfeb82da65b9c851e92c256440c05c4fd4317da4d6  node_modules/@credenshare/sdk/dist/conformance-vectors.json" | sha256sum -c -
+          echo "91e70661be51edbc4522d202c533292d1eac92691d1fbb02e9eaa13eb23a582c  node_modules/@credenshare/sdk/dist/conformance-vectors.json" | sha256sum -c -
