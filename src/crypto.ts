@@ -19,8 +19,9 @@
  * is the only meaningful definition of correct.
  *
  * WHY WEBCRYPTO
- * `globalThis.crypto.subtle` is the one API present in Node 18+, Deno, Bun, Cloudflare
- * Workers and browsers alike. Reaching for `node:crypto` would make this package
+ * `globalThis.crypto.subtle` is the one API present in Node 20+, Deno, Bun, Cloudflare
+ * Workers and browsers alike. (Node 18 HAS WebCrypto but does not expose it globally without
+ * a flag, so 20 is the floor - CI found that after the package had claimed 18+ for a while.) Reaching for `node:crypto` would make this package
  * Node-only, and the runtimes this is most useful in — edge functions, CI runners — are
  * exactly the ones that do not have it.
  */
@@ -67,8 +68,9 @@ const subtle = (): SubtleCrypto => {
   const c = globalThis.crypto
   if (!c?.subtle) {
     throw new Error(
-      'WebCrypto is unavailable. This SDK needs Node 18+, Deno, Bun, a Worker runtime or a ' +
-        'browser. On older Node, `globalThis.crypto = require("node:crypto").webcrypto` works.',
+      'WebCrypto is unavailable. This SDK needs Node 20+, Deno, Bun, a Worker runtime or a ' +
+        'browser. Node 18 has WebCrypto but does not expose it as `globalThis.crypto` without ' +
+        'a flag; there, `globalThis.crypto = require("node:crypto").webcrypto` works.',
     )
   }
   return c.subtle

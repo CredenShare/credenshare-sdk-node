@@ -25,7 +25,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        node: ["18", "20", "22", "24"]
+        # 20 is the floor, not 18: Node 18 has WebCrypto but does not expose it as
+        # globalThis.crypto without a flag, so every derivation throws. CI found that;
+        # the package had claimed 18+ since it was written. 18 is EOL regardless.
+        node: ["20", "22", "24"]
         include:
           # The crypto is portable; path handling and console encodings are not, and the
           # self-check prints text drawn from the vectors — one of which is deliberately

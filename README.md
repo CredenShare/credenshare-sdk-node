@@ -30,8 +30,9 @@ Anyone holding the link can read the content; we cannot, and cannot recover it f
 
 ## Where it runs
 
-Node 18+, Deno, Bun, Cloudflare Workers and browsers. The crypto goes through
-`globalThis.crypto.subtle`, which is the one API all of them have — reaching for
+Node 20+, Deno, Bun, Cloudflare Workers and browsers. The crypto goes through
+`globalThis.crypto.subtle`, which is the one API all of them have (Node 18 has WebCrypto but
+does not expose it globally without a flag, which is why 20 is the floor) — reaching for
 `node:crypto` would make this package Node-only, and the runtimes it is most useful in (edge
 functions, CI runners) are exactly the ones that do not have it.
 

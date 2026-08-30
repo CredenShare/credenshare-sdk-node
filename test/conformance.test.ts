@@ -79,10 +79,16 @@ describe('properties of this implementation, not of the fixture', () => {
     // Telling them apart would hand an attacker an oracle.
     const key = unhex(vectors.content[0].key)
     const blob = vectors.content[1].blob
-    const wrongPasscode = crypto.decryptContent(key, blob, 'not-hunter2')
-    const altered = crypto.decryptContent(key, vectors.content[0].blob.slice(0, -4) + 'AAAA')
-    await assert.rejects(() => wrongPasscode, WireFormatError)
-    await assert.rejects(() => altered, WireFormatError)
+    // Thunks, not eagerly-created promises. Building both up front leaves the second one
+    // floating until the first assertion resolves, and if it rejects in that window Node
+    // reports an unhandledRejection and fails the test. It is timing-dependent, so it passed
+    // on Linux and Windows and failed on a macOS runner - which is the worst kind of flake:
+    // one that looks like a platform difference in the crypto.
+    await assert.rejects(() => crypto.decryptContent(key, blob, 'not-hunter2'), WireFormatError)
+    await assert.rejects(
+      () => crypto.decryptContent(key, vectors.content[0].blob.slice(0, -4) + 'AAAA'),
+      WireFormatError,
+    )
   })
 
   it('refuses a field that uses label, name or title instead of key', () => {
