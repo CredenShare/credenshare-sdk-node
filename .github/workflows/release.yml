@@ -1,0 +1,70 @@
+name: Release
+
+# Tag-triggered. Nothing here fires on a push to a branch: publishing to npm is
+# irreversible — a version can be deprecated but never reused — so it takes the deliberate
+# act of tagging.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify before anything is published
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: node dist/conformance-cli.js -v
+
+      - name: The tag must match the version in package.json
+        # A mismatch produces a release that says one thing on GitHub and another on npm, and
+        # the version is how anyone reports which code they were running.
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::tag v$TAG does not match package.json version $VERSION"
+            exit 1
+          fi
+          echo "releasing $VERSION"
+
+      - name: The tarball must carry the fixture verbatim
+        # The last chance to catch the packaging mistake that would ship a reformatted
+        # fixture — semantically fine, byte-wise different from the normative artifact, and
+        # therefore useless as the thing that holds five implementations together.
+        run: |
+          echo "fa4011ffbd4f45e534117bbfeb82da65b9c851e92c256440c05c4fd4317da4d6  dist/conformance-vectors.json" | sha256sum -c -
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    # Trusted Publishing: npm mints a short-lived token for this workflow on this repository,
+    # so there is no long-lived automation token in the repository's secrets to leak or
+    # rotate. `id-token: write` is what allows the OIDC exchange.
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@credenshare/sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci && npm run build
+      - run: npm publish --provenance --access public

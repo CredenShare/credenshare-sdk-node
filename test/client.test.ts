@@ -1,0 +1,363 @@
+/**
+ * Client behaviour, against a stub fetch.
+ *
+ * The properties worth testing here are not "does it call the right URL" but the ones where
+ * being wrong is silent or dangerous: the custody secret never leaving the machine, the
+ * content key never appearing in a request, and error types that imply the right remedy.
+ */
+
+import assert from 'node:assert/strict'
+import { describe, it } from 'node:test'
+
+import { CredenShare, Credential } from '../src/client.js'
+import * as crypto from '../src/crypto.js'
+import {
+  ApiError,
+  AuthenticationError,
+  CredentialFormatError,
+  IdempotencyConflictError,
+  NotFoundError,
+  PermissionError,
+  QuotaExceededError,
+  RateLimitError,
+  ServiceUnavailableError,
+} from '../src/errors.js'
+
+const CREDENTIAL = 'crs_sk_live_abc123.authsecretvalue.custodysecretvalue'
+const TWO_PART = 'crs_sk_live_abc123.authsecretvalue'
+
+interface Recorded {
+  url: string
+  method: string
+  headers: Record<string, string>
+  body?: string
+}
+
+function recorder(
+  responses: Array<{ status: number; body: unknown; headers?: Record<string, string> }> | {
+    status: number
+    body: unknown
+    headers?: Record<string, string>
+  },
+) {
+  const queue = Array.isArray(responses) ? [...responses] : null
+  const single = Array.isArray(responses) ? null : responses
+  const requests: Recorded[] = []
+
+  const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+    requests.push({
+      url: String(url),
+      method: init?.method ?? 'GET',
+      headers: Object.fromEntries(
+        Object.entries((init?.headers ?? {}) as Record<string, string>).map(([k, v]) => [
+          k.toLowerCase(),
+          v,
+        ]),
+      ),
+      body: typeof init?.body === 'string' ? init.body : undefined,
+    })
+    const next = single ?? queue!.shift()!
+    return new Response(JSON.stringify(next.body), {
+      status: next.status,
+      headers: { 'content-type': 'application/json', ...(next.headers ?? {}) },
+    })
+  }) as unknown as typeof globalThis.fetch
+
+  return { requests, fetchImpl }
+}
+
+function client(fetchImpl: typeof globalThis.fetch, credential = CREDENTIAL): CredenShare {
+  return new CredenShare(credential, { fetch: fetchImpl, linkOrigin: 'https://crs.sh' })
+}
+
+const FIELD = { key: 'k', value: 'v', type: 'text' as const }
+
+// -- credential handling --------------------------------------------------------------
+
+describe('the credential', () => {
+  it('parses both forms', () => {
+    assert.equal(Credential.parse(CREDENTIAL).keyId, 'abc123')
+    assert.equal(Credential.parse(CREDENTIAL).hasCustody, true)
+    assert.equal(Credential.parse(TWO_PART).hasCustody, false)
+  })
+
+  for (const bad of ['', 'nope', 'crs_sk_live_onepart', 'crs_sk_live_a.b.c.d', 'crs_sk_live_a..c']) {
+    it(`refuses ${JSON.stringify(bad)}`, () => {
+      assert.throws(() => Credential.parse(bad), CredentialFormatError)
+    })
+  }
+
+  it('never appears in its string form', () => {
+    // A credential in a log line is a credential that has to be rotated.
+    const text = String(Credential.parse(CREDENTIAL))
+    assert.ok(!text.includes('authsecretvalue'))
+    assert.ok(!text.includes('custodysecretvalue'))
+    assert.ok(text.includes('abc123'))
+  })
+
+  it('derives the custody public key locally', async () => {
+    const expected = (await crypto.custodyKeypair('custodysecretvalue')).publicKeyB64url
+    assert.equal(await Credential.parse(CREDENTIAL).custodyPublicKey(), expected)
+  })
+
+  it('has no custody keypair without a custody secret', async () => {
+    await assert.rejects(() => Credential.parse(TWO_PART).custodyPublicKey(), CredentialFormatError)
+  })
+
+  it('never transmits the custody secret', async () => {
+    // THE property of the split credential. The custody half exists so the server CANNOT
+    // reconstruct the private key. If it reaches the wire that guarantee is gone.
+    const { requests, fetchImpl } = recorder({ status: 201, body: { short_code: 'abc123' } })
+    await client(fetchImpl).shares.create({ title: 't', fields: [FIELD] })
+
+    const everything = JSON.stringify(requests[0])
+    assert.ok(!everything.includes('custodysecretvalue'))
+    assert.equal(requests[0].headers.authorization, `Bearer ${TWO_PART}`)
+  })
+})
+
+// -- create ---------------------------------------------------------------------------
+
+describe('create', () => {
+  it('sends ciphertext and never the key', async () => {
+    const { requests, fetchImpl } = recorder({ status: 201, body: { short_code: 'xy12' } })
+    const share = await client(fetchImpl).shares.create({
+      title: 'Staging deploy credentials',
+      fields: [{ key: 'Password', value: 'correct horse', type: 'password' }],
+    })
+
+    const body = JSON.parse(requests[0].body!)
+    assert.equal(body.encryption_type, 'e2ee-aes256-gcm')
+    assert.ok(!requests[0].body!.includes('correct horse'))
+    assert.ok(!requests[0].body!.includes(crypto.b64url(share.contentKey)))
+
+    // But the blob must decrypt with the key the caller was handed.
+    assert.deepEqual(await crypto.decryptContent(share.contentKey, body.data), [
+      { key: 'Password', value: 'correct horse', type: 'password' },
+    ])
+  })
+
+  it('puts the key in the link fragment', async () => {
+    const { fetchImpl } = recorder({ status: 201, body: { short_code: 'xy12' } })
+    const share = await client(fetchImpl).shares.create({ title: 't', fields: [FIELD] })
+    assert.ok(share.link.startsWith('https://crs.sh/xy12#'))
+    assert.deepEqual(crypto.decodeFragment(share.link.split('#')[1]), share.contentKey)
+  })
+
+  it('always sends an Idempotency-Key', async () => {
+    // Required by the API. A retried automation must not silently create a second copy of a
+    // credential in the world, with its own link and audit trail.
+    const { requests, fetchImpl } = recorder({ status: 201, body: { short_code: 'xy12' } })
+    await client(fetchImpl).shares.create({ title: 't', fields: [FIELD] })
+    assert.ok(requests[0].headers['idempotency-key'])
+  })
+
+  it('sends a passcode verifier and never the passcode', async () => {
+    const { requests, fetchImpl } = recorder({ status: 201, body: { short_code: 'xy12' } })
+    await client(fetchImpl).shares.create({ title: 't', fields: [FIELD], passcode: 'hunter2' })
+    const body = JSON.parse(requests[0].body!)
+    assert.equal(body.passcode_verifier, await crypto.passcodeVerifier('hunter2'))
+    assert.ok(!requests[0].body!.includes('hunter2'))
+  })
+
+  it('refuses a field using label before any request is made', async () => {
+    const { requests, fetchImpl } = recorder({ status: 201, body: {} })
+    await assert.rejects(
+      () =>
+        client(fetchImpl).shares.create({
+          title: 't',
+          fields: [{ label: 'Password', value: 'v', type: 'password' } as never],
+        }),
+      /the member is 'key'/,
+    )
+    assert.equal(requests.length, 0, 'nothing should have been sent')
+  })
+})
+
+// -- idempotency ----------------------------------------------------------------------
+
+describe('idempotency', () => {
+  it('names a replayed key for what it is', async () => {
+    // Passing the same key to two creates cannot work: each draws a fresh salt and IV, so
+    // the bodies differ and the API refuses. The error has to say that, because "409
+    // conflict" sends people looking for a duplicate share that does not exist.
+    const { fetchImpl } = recorder({
+      status: 409,
+      body: { message: 'already used', error_code: 105 },
+    })
+    await assert.rejects(
+      () => client(fetchImpl).shares.create({ title: 't', fields: [FIELD], idempotencyKey: 'fixed' }),
+      IdempotencyConflictError,
+    )
+  })
+
+  it('a supplied content key fixes the link but not the body', async () => {
+    // The distinction a live run had to teach: a fixed content key gives both calls the same
+    // link and access token, but the ciphertext still differs, because the salt and IV are
+    // fresh every time and must be.
+    const { requests, fetchImpl } = recorder([
+      { status: 201, body: { short_code: 'xy12' } },
+      { status: 201, body: { short_code: 'xy12' } },
+    ])
+    const crs = client(fetchImpl)
+    const contentKey = new Uint8Array(32).map((_, i) => i)
+    const a = await crs.shares.create({ title: 't', fields: [FIELD], contentKey })
+    const b = await crs.shares.create({ title: 't', fields: [FIELD], contentKey })
+
+    assert.equal(a.link, b.link)
+    const [first, second] = requests.map((r) => JSON.parse(r.body!))
+    assert.equal(first.access_token, second.access_token)
+    assert.notEqual(first.data, second.data, 'a repeated IV would be the real bug here')
+  })
+})
+
+// -- reads ----------------------------------------------------------------------------
+
+describe('reads', () => {
+  it('returns metadata only, with the paging figures attached', async () => {
+    const { fetchImpl } = recorder({
+      status: 200,
+      body: {
+        shares: [{ short_code: 'a1', expired_at: null }],
+        pagination: { page: 1, limit: 2, total: 5, total_pages: 3 },
+      },
+    })
+    const rows = await client(fetchImpl).shares.list({ limit: 2 })
+    assert.equal(rows.shares[0].shortCode, 'a1')
+    assert.equal(rows.total, 5)
+    assert.equal(rows.hasMore, true)
+    // An attribute that is always undefined reads as a broken field rather than an absent
+    // one, so the API's silence about titles is reflected in the shape.
+    assert.ok(!('title' in rows.shares[0]))
+  })
+
+  it('does not stop iterating on a short middle page', async () => {
+    // The bug in every hand-rolled version of this loop. A server may return a page shorter
+    // than the limit in the MIDDLE of a result set; stopping there silently truncates.
+    const page = (codes: string[], p: number) => ({
+      status: 200,
+      body: {
+        shares: codes.map((c) => ({ short_code: c })),
+        pagination: { page: p, limit: 2, total: 5, total_pages: 3 },
+      },
+    })
+    const { requests, fetchImpl } = recorder([page(['a1', 'a2'], 1), page(['b1'], 2), page(['c1', 'c2'], 3)])
+
+    const seen: string[] = []
+    for await (const row of client(fetchImpl).shares.iterateAll({ limit: 2 })) seen.push(row.shortCode)
+
+    assert.deepEqual(seen, ['a1', 'a2', 'b1', 'c1', 'c2'])
+    assert.equal(requests.length, 3)
+  })
+
+  it('issues a DELETE to expire', async () => {
+    const { requests, fetchImpl } = recorder({ status: 200, body: {} })
+    await client(fetchImpl).shares.expire('a1')
+    assert.equal(requests[0].method, 'DELETE')
+    assert.ok(requests[0].url.endsWith('/shares/a1'))
+  })
+
+  it('refuses the recipient read path with a reason', async () => {
+    const { fetchImpl } = recorder({ status: 200, body: {} })
+    await assert.rejects(() => client(fetchImpl).readLink('https://crs.sh/abc#1AAA'), /by design/)
+  })
+})
+
+// -- errors imply remedies -------------------------------------------------------------
+
+describe('errors', () => {
+  const cases: Array<[number, Record<string, unknown>, new (...args: never[]) => Error]> = [
+    [401, { message: 'bad credential' }, AuthenticationError],
+    [403, { message: 'no api access' }, PermissionError],
+    [403, { message: 'limit reached', error_code: 61 }, QuotaExceededError],
+    [404, { message: 'not found' }, NotFoundError],
+    [503, { message: 'unavailable' }, ServiceUnavailableError],
+    [500, { message: 'boom' }, ApiError],
+  ]
+
+  for (const [status, body, expected] of cases) {
+    it(`maps ${status}${body.error_code ? `/${String(body.error_code)}` : ''} to ${expected.name}`, async () => {
+      const { fetchImpl } = recorder({ status, body })
+      await assert.rejects(() => client(fetchImpl).shares.list(), expected)
+    })
+  }
+
+  it('a spent quota is not a rate limit', async () => {
+    // Both are refusals, but waiting fixes one and not the other.
+    const { fetchImpl } = recorder({ status: 403, body: { message: 'limit', error_code: 61 } })
+    await assert.rejects(
+      () => client(fetchImpl).shares.list(),
+      (error: Error) => error instanceof QuotaExceededError && !(error instanceof RateLimitError),
+    )
+  })
+
+  it('exposes retryAfter on a rate limit', async () => {
+    const { fetchImpl } = recorder({
+      status: 429,
+      body: { message: 'slow down' },
+      headers: { 'retry-after': '42' },
+    })
+    await assert.rejects(
+      () => client(fetchImpl).shares.list(),
+      (error: Error) => error instanceof RateLimitError && error.retryAfter === 42,
+    )
+  })
+})
+
+// -- transport retries -----------------------------------------------------------------
+
+describe('retries', () => {
+  it('repeats a dropped connection with the byte-identical request', async () => {
+    // The case the mandatory header exists for. The retry must repeat the identical body, or
+    // the server sees a new one under a used key and refuses — turning a recoverable blip
+    // into a hard failure.
+    const seen: Recorded[] = []
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      seen.push({
+        url: String(url),
+        method: init?.method ?? 'GET',
+        headers: Object.fromEntries(
+          Object.entries((init?.headers ?? {}) as Record<string, string>).map(([k, v]) => [
+            k.toLowerCase(),
+            v,
+          ]),
+        ),
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      })
+      if (seen.length === 1) throw new TypeError('fetch failed')
+      return new Response(JSON.stringify({ short_code: 'xy12' }), { status: 201 })
+    }) as unknown as typeof globalThis.fetch
+
+    const share = await new CredenShare(CREDENTIAL, { fetch: fetchImpl }).shares.create({
+      title: 't',
+      fields: [FIELD],
+    })
+
+    assert.equal(share.shortCode, 'xy12')
+    assert.equal(seen.length, 2)
+    assert.equal(seen[0].headers['idempotency-key'], seen[1].headers['idempotency-key'])
+    assert.equal(seen[0].body, seen[1].body)
+  })
+
+  it('does not retry an HTTP 500', async () => {
+    // It may have committed, and this client cannot tell. Retrying would risk a second copy
+    // of a credential in the world under a caller who believes one was created.
+    const { requests, fetchImpl } = recorder({ status: 500, body: { message: 'boom' } })
+    await assert.rejects(() => client(fetchImpl).shares.create({ title: 't', fields: [FIELD] }), ApiError)
+    assert.equal(requests.length, 1)
+  })
+
+  it('bounds retries and surfaces them as unavailable', async () => {
+    let attempts = 0
+    const fetchImpl = (async () => {
+      attempts += 1
+      throw new TypeError('fetch failed')
+    }) as unknown as typeof globalThis.fetch
+
+    await assert.rejects(
+      () => new CredenShare(CREDENTIAL, { fetch: fetchImpl, maxRetries: 1 }).shares.list(),
+      ServiceUnavailableError,
+    )
+    assert.equal(attempts, 2)
+  })
+})

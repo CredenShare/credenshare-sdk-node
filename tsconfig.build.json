@@ -1,0 +1,10 @@
+{
+  // The build compiles src only. The base config includes the tests so `tsc --noEmit`
+  // typechecks them too, but a rootDir covering both would emit dist/src and dist/test and
+  // break every "./dist/index.js" path in package.json.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src"
+  },
+  "include": ["src/**/*"]
+}

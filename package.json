@@ -1,0 +1,60 @@
+{
+  "name": "@credenshare/sdk",
+  "version": "0.1.0",
+  "description": "End-to-end encrypted secret sharing. Encryption happens on your machine.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./webhooks": {
+      "types": "./dist/webhooks.d.ts",
+      "default": "./dist/webhooks.js"
+    },
+    "./conformance": {
+      "types": "./dist/conformance.d.ts",
+      "default": "./dist/conformance.js"
+    }
+  },
+  "bin": {
+    "credenshare-conformance": "./dist/conformance-cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-vectors.mjs",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src test",
+    "conformance": "node --import tsx src/conformance-cli.ts -v",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": [
+    "credenshare",
+    "secrets",
+    "encryption",
+    "e2ee",
+    "zero-knowledge"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CredenShare/credenshare-sdk-node.git"
+  },
+  "homepage": "https://credenshare.io",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
