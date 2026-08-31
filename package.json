@@ -28,7 +28,8 @@
     "README.md",
     "LICENSE",
     "NOTICE",
-    "CRYPTO_WIRE_SPEC.md"
+    "CRYPTO_WIRE_SPEC.md",
+    "VERSIONING.md"
   ],
   "engines": {
     "node": ">=20"
