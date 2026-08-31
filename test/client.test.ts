@@ -8,9 +8,11 @@
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
+import { readFileSync } from 'node:fs'
 import { inspect } from 'node:util'
 
 import { CredenShare, Credential } from '../src/client.js'
+import { VERSION } from '../src/index.js'
 import * as crypto from '../src/crypto.js'
 import {
   ApiError,
@@ -616,5 +618,18 @@ describe('retries', () => {
       seen.push(summary.shortCode)
     }
     assert.deepEqual(seen, ['a', 'b', 'c'])
+  })
+})
+
+describe('the package version', () => {
+  it('matches package.json', () => {
+    // VERSION is a second copy of a number that also lives in package.json, so it drifts: it
+    // said '0.1.0' while 0.1.3 was on npm. The release guard compared the TAG to package.json
+    // and never to this, so nothing noticed. Now something does, and it runs in the release
+    // verification too.
+    const manifest = JSON.parse(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as { version: string }
+    assert.equal(VERSION, manifest.version, 'src/index.ts VERSION has drifted from package.json')
   })
 })

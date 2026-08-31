@@ -1,6 +1,6 @@
 {
   "name": "@credenshare/sdk",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "End-to-end encrypted secret sharing. Encryption happens on your machine.",
   "license": "Apache-2.0",
   "type": "module",
@@ -18,7 +18,8 @@
     "./conformance": {
       "types": "./dist/conformance.d.ts",
       "default": "./dist/conformance.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "bin": {
     "credenshare-conformance": "./dist/conformance-cli.js"
