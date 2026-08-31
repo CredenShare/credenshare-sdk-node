@@ -147,7 +147,9 @@ jobs:
         # resolves, so without the copy step the shipped fixture is semantically identical
         # and byte-wise different — and the digest would be pinning a file nobody ships.
         run: |
-          TARBALL=$(npm pack --silent)
+          # `prepare` runs the build during `npm pack`, so anything the build writes to
+          # stdout lands in here too. Take the last line, which is the filename.
+          TARBALL=$(npm pack --silent | tail -1)
           mkdir -p /tmp/verify && cd /tmp/verify
           npm init -y >/dev/null
           npm install "$GITHUB_WORKSPACE/$TARBALL"

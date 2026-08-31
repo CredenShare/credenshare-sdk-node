@@ -26,4 +26,4 @@ if (before !== after) {
   console.error(`the copied fixture does not match the source\n  src:  ${before}\n  dist: ${after}`)
   process.exit(1)
 }
-console.log(`conformance fixture copied verbatim (sha256:${after})`)
+console.error(`conformance fixture copied verbatim (sha256:${after})`)
