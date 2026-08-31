@@ -522,20 +522,25 @@ class Shares {
     const pagination = (data.pagination ?? {}) as Record<string, number | undefined>
     const totalPages = pagination.total_pages
     const resolvedPage = pagination.page ?? page
+    // The limit the SERVER applied, not the one the caller asked for. A server free to cap
+    // page size returns fewer rows than requested on a page that is nonetheless full, and
+    // comparing against the request makes that look like the end of the result set.
+    const resolvedLimit = pagination.limit ?? limit
     return {
       shares: rows.map((row) => ({
         shortCode: String(row.short_code),
         expiredAt: (row.expired_at as string | null) ?? null,
       })),
       page: resolvedPage,
-      limit: pagination.limit ?? limit,
+      limit: resolvedLimit,
       total: pagination.total,
       totalPages,
       // When the server omits total_pages, fall back to a full-page heuristic rather
       // than to false. Reporting "no more" on a full page is what makes iterateAll()
       // stop after page one and silently return a fraction of the account — the exact
       // truncation this type exists to prevent.
-      hasMore: totalPages === undefined ? rows.length >= limit : resolvedPage < totalPages,
+      hasMore:
+        totalPages === undefined ? rows.length >= resolvedLimit : resolvedPage < totalPages,
     }
   }
 
@@ -598,7 +603,13 @@ function errorFor(response: Response, payload: ApiPayload, text: string): ApiErr
   const code = typeof payload.error_code === 'number' ? payload.error_code : undefined
   const requestId =
     response.headers.get('x-request-id') ?? response.headers.get('x-amzn-requestid')
-  const init = { status: response.status, code, requestId }
+  // The server's per-field detail. Dropped until now, so a validation error never named the
+  // field it rejected and the caller had to re-issue the request to find out.
+  const additionalData =
+    payload.additional_data && typeof payload.additional_data === 'object'
+      ? (payload.additional_data as Record<string, unknown>)
+      : undefined
+  const init = { status: response.status, code, requestId, additionalData }
 
   switch (response.status) {
     case 401:

@@ -438,6 +438,58 @@ describe('retries', () => {
     assert.equal(requests[0].headers['idempotency-key'], share.idempotencyKey)
   })
 
+  it("uses the server's echoed limit, not the caller's, to decide hasMore", async () => {
+    // A server free to cap page size returns fewer rows than asked for on a page that is
+    // nonetheless full. Comparing against the REQUEST makes that look like the end of the
+    // result set, and iterateAll stops with most of the account unvisited.
+    const pages = [
+      { shares: Array.from({ length: 50 }, (_, i) => ({ short_code: `a${i}` })), pagination: { page: 1, limit: 50 } },
+      { shares: Array.from({ length: 20 }, (_, i) => ({ short_code: `b${i}` })), pagination: { page: 2, limit: 50 } },
+    ]
+    // A fresh stub per assertion: the two walks must not share a page cursor.
+    const stub = () => {
+      let call = 0
+      return (async () =>
+        new Response(JSON.stringify(pages[Math.min(call++, pages.length - 1)]), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })) as unknown as typeof globalThis.fetch
+    }
+
+    const first = await new CredenShare(CREDENTIAL, { fetch: stub() }).shares.list({ limit: 100 })
+    assert.equal(first.limit, 50, 'the page reports the limit the server applied')
+    assert.equal(first.hasMore, true, 'a full 50-row page under a server cap is not the end')
+
+    const seen: string[] = []
+    const walker = new CredenShare(CREDENTIAL, { fetch: stub() }).shares
+    for await (const s of walker.iterateAll({ limit: 100 })) seen.push(s.shortCode)
+    assert.equal(seen.length, 70, 'iterateAll must not stop at the server-capped first page')
+  })
+
+  it('surfaces the server per-field detail on a validation error', async () => {
+    // Without this a 4xx never names the field it rejected, and for a create the only way to
+    // find out is to encrypt and send the secret a second time.
+    const { fetchImpl } = recorder({
+      status: 400,
+      body: {
+        message: 'invalid request',
+        error_code: 7,
+        additional_data: { field: 'expired_at', reason: 'must be in the future' },
+      },
+    })
+    await assert.rejects(
+      () => client(fetchImpl).shares.create({ title: 't', fields: [FIELD] }),
+      (error: unknown) => {
+        assert.ok(error instanceof ApiError)
+        assert.deepEqual(error.additionalData, {
+          field: 'expired_at',
+          reason: 'must be in the future',
+        })
+        return true
+      },
+    )
+  })
+
   it('keeps paging when the server omits total_pages', async () => {
     // Treating an absent pagination block as "no more" made iterateAll return page one and
     // stop, silently reporting a fraction of the account as all of it.

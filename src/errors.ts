@@ -67,6 +67,7 @@ export interface ApiErrorInit {
   status?: number
   code?: number
   requestId?: string | null
+  additionalData?: Record<string, unknown>
 }
 
 /** Any refusal from the API. */
@@ -76,6 +77,15 @@ export class ApiError extends CredenShareError {
   readonly code?: number
   /** Quote this when reporting a problem; it identifies the exact request in our logs. */
   readonly requestId?: string | null
+  /**
+   * The server's `additional_data`, where it sent any.
+   *
+   * This is where a 4xx names the field it rejected — `{ field: 'expired_at', reason: 'must
+   * be in the future' }`. Dropping it meant a validation failure could not be attributed to
+   * a request field without re-issuing the call and reading the raw body, which for a create
+   * means encrypting and sending the secret a second time.
+   */
+  readonly additionalData?: Record<string, unknown>
 
   constructor(message: string, init: ApiErrorInit = {}) {
     const parts = [
@@ -87,6 +97,7 @@ export class ApiError extends CredenShareError {
     this.status = init.status
     this.code = init.code
     this.requestId = init.requestId
+    this.additionalData = init.additionalData
   }
 }
 
