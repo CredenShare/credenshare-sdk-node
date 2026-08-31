@@ -23,7 +23,12 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
+      # Same opt-in variable CI uses. Without it here, a release is the only build that
+      # never checks the fixture against the canonical copy - and it is the one that
+      # cannot be taken back.
       - run: npm test
+        env:
+          CREDENSHARE_VECTORS_URL: ${{ vars.CREDENSHARE_VECTORS_URL }}
       - run: npm run build
       - run: node dist/conformance-cli.js -v
 
