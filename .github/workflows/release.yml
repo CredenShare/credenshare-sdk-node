@@ -71,6 +71,13 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: npm
 
+      # npm's OIDC trusted publishing requires npm >= 11.5.1. Node 22 bundles npm 10.9.8,
+      # so without this the CLI doing the publish does not support the OIDC exchange at
+      # all - and it fails looking like a credentials problem rather than a version one.
+      # Upgraded HERE only: the test matrix stays on what Node ships, because that is what
+      # consumers actually run.
+      - run: npm install -g npm@^11.5.1
+      - run: npm --version
       - run: npm ci && npm run build
       # Works either way. npm's OIDC trusted publishing needs no secret, but it generally
       # wants the package to EXIST before a publisher can be configured for it - and this
