@@ -59,7 +59,7 @@ jobs:
     # rotate. `id-token: write` is what allows the OIDC exchange.
     permissions:
       id-token: write
-      contents: read
+      contents: write
     environment:
       name: npm
       url: https://www.npmjs.com/package/@credenshare/sdk
@@ -73,3 +73,35 @@ jobs:
 
       - run: npm ci && npm run build
       - run: npm publish --provenance --access public
+        if: vars.PUBLISH_TO_REGISTRY == 'true'
+
+      - name: Registry publication is not switched on
+        if: vars.PUBLISH_TO_REGISTRY != 'true'
+        run: |
+          echo "::notice title=Not published to the registry::This release was verified and \
+          tagged, but PUBLISH_TO_REGISTRY is not 'true' so nothing was uploaded. Configure the \
+          registry credential for this repository, then set the repository variable \
+          PUBLISH_TO_REGISTRY=true. See VERSIONING.md."
+
+      # A GitHub Release is the durable, registry-independent artifact: it exists whether or
+      # not PUBLISH_TO_REGISTRY is on, so a tag always produces something a consumer can
+      # point at and something this repository can be verified against later.
+      - name: Publish the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME"             --title "$GITHUB_REF_NAME"             --notes "Install:
+
+          \`\`\`
+          npm install github:CredenShare/credenshare-sdk-node#$GITHUB_REF_NAME
+          \`\`\`
+
+          Verify the install against the wire specification:
+
+          \`\`\`
+          npx credenshare-conformance
+          \`\`\`
+
+          See CHANGELOG.md for what changed.
+
+          Not on npm yet - see VERSIONING.md."
