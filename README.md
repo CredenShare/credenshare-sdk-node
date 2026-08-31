@@ -5,8 +5,11 @@ never reaches CredenShare, which is what makes "we cannot read your data" a prop
 system rather than a promise.
 
 ```bash
-npm install @credenshare/sdk
+npm install github:CredenShare/credenshare-sdk-node
 ```
+> Not on npm yet. The command above installs from source, which is a
+> supported way to use this SDK - the conformance self-check runs the same either way.
+
 
 ```ts
 import { CredenShare } from '@credenshare/sdk'
