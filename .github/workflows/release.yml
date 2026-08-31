@@ -72,8 +72,16 @@ jobs:
           cache: npm
 
       - run: npm ci && npm run build
+      # Works either way. npm's OIDC trusted publishing needs no secret, but it generally
+      # wants the package to EXIST before a publisher can be configured for it - and this
+      # package does not exist yet. So if NPM_TOKEN is present it is used (which is what a
+      # first publish needs), and if it is absent the OIDC path runs. Once the package exists
+      # and a trusted publisher is configured, delete the secret and this falls back to OIDC
+      # with no other change.
       - run: npm publish --provenance --access public
         if: vars.PUBLISH_TO_REGISTRY == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Registry publication is not switched on
         if: vars.PUBLISH_TO_REGISTRY != 'true'
