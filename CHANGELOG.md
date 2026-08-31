@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.1 — released 2026-08-30
+
+`v0.1.0` was tagged before the release-facing files were corrected, so the artifact resolved at
+that tag told consumers to install unpinned and its changelog denied its own release. This
+version contains those corrections. Nothing about the cryptography or the wire format changed
+between the two; the conformance fixture is byte-identical.
+
+### Fixed
+
+- **`iterateAll` terminates, and walks the whole account.** 0.1.0 had two defects in one
+  comparison. A server echoing `limit: 0` made `rows.length >= 0` true on every page, so the
+  walk never ended — measured at 43 requests before an external abort. And the ladder had only
+  two rungs, so a server capping pages to 30 while reporting `total: 120` read as the end after
+  one page, losing 90 rows with the count sitting on the returned object. A non-positive limit
+  echo is now ignored, all three rungs are present, and `iterateAll` refuses a constant page
+  echo and stops at `MAX_PAGES`.
+- **`additionalData` no longer accepts a JSON array.** `typeof [] === 'object'`, so an array
+  reached callers behind a declared `Record<string, unknown>`.
+
+### Documentation
+
+- The README install line names the tag, and the changelog no longer describes 0.1.0 as
+  unreleased.
+
 ## 0.1.0 — released 2026-08-30
 
 First release.
