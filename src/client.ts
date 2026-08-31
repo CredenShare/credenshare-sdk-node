@@ -52,6 +52,15 @@ const IDEMPOTENCY_IN_FLIGHT_CODE = 106
  * retry because the Idempotency-Key and the body are both identical on the second attempt —
  * which is the entire reason the header is mandatory.
  */
+/**
+ * The most pages `iterateAll()` will walk before giving up.
+ *
+ * The end of a result set is not always knowable: a server that omits every paging figure and
+ * returns full pages forever cannot be told from a very large account. An unbounded walk
+ * against one never returns. At the default page size of 100 this is ten million shares.
+ */
+export const MAX_PAGES = 100_000
+
 export const DEFAULT_MAX_RETRIES = 2
 
 const CREDENTIAL_PREFIX = 'crs_sk_live_'
@@ -525,7 +534,15 @@ class Shares {
     // The limit the SERVER applied, not the one the caller asked for. A server free to cap
     // page size returns fewer rows than requested on a page that is nonetheless full, and
     // comparing against the request makes that look like the end of the result set.
-    const resolvedLimit = pagination.limit ?? limit
+    // A non-positive echo is not information, so it is ignored in favour of what was asked
+    // for. Believing `limit: 0` made `rows.length >= 0` true on every page, including empty
+    // ones, and the walk never ended - strictly worse than the truncation the fallback fixed.
+    const echoed = pagination.limit
+    const resolvedLimit = echoed !== undefined && echoed > 0 ? echoed : limit
+    const total = pagination.total
+    // Belt and braces: if the caller also asked for 0, fall back to what arrived, and if
+    // nothing arrived there is no progress to claim.
+    const progress = resolvedLimit > 0 ? resolvedLimit : rows.length
     return {
       shares: rows.map((row) => ({
         shortCode: String(row.short_code),
@@ -533,14 +550,19 @@ class Shares {
       })),
       page: resolvedPage,
       limit: resolvedLimit,
-      total: pagination.total,
+      total,
       totalPages,
-      // When the server omits total_pages, fall back to a full-page heuristic rather
-      // than to false. Reporting "no more" on a full page is what makes iterateAll()
-      // stop after page one and silently return a fraction of the account — the exact
-      // truncation this type exists to prevent.
+      // Three rungs, in descending order of how much the server told us. Reporting "no
+      // more" on a full page is what makes iterateAll() stop after page one and silently
+      // return a fraction of the account; but a rung that can be true FOREVER is worse - it
+      // turns that truncation into a request loop. `progress` is what prevents it: when the
+      // server echoes limit: 0 and sends an empty page, no rung can claim there is more.
       hasMore:
-        totalPages === undefined ? rows.length >= resolvedLimit : resolvedPage < totalPages,
+        totalPages !== undefined
+          ? resolvedPage < totalPages
+          : total !== undefined
+            ? progress > 0 && resolvedPage * progress < total
+            : progress > 0 && rows.length >= progress,
     }
   }
 
@@ -557,6 +579,21 @@ class Shares {
       const batch = await this.list({ limit: options.limit ?? 100, page })
       yield* batch.shares
       if (!batch.hasMore) return
+
+      // The API echoing a page number other than the one asked for makes progress
+      // unobservable, so no termination condition can be trusted. Refuse rather than loop.
+      if (batch.page !== page) {
+        throw new ApiError(
+          `asked for page ${page} and the API answered with page ${batch.page}, so paging ` +
+            `cannot be trusted to terminate`,
+        )
+      }
+      if (page >= MAX_PAGES) {
+        throw new ApiError(
+          `stopped after ${MAX_PAGES} pages without the API signalling the end of the result ` +
+            `set. A walk that cannot terminate is worse than one that stops and says so.`,
+        )
+      }
       page += 1
     }
   }
@@ -605,8 +642,12 @@ function errorFor(response: Response, payload: ApiPayload, text: string): ApiErr
     response.headers.get('x-request-id') ?? response.headers.get('x-amzn-requestid')
   // The server's per-field detail. Dropped until now, so a validation error never named the
   // field it rejected and the caller had to re-issue the request to find out.
+  // typeof [] === 'object', so without the Array check a JSON array reaches the caller
+  // behind a declared Record type - a lie the type system cannot catch.
   const additionalData =
-    payload.additional_data && typeof payload.additional_data === 'object'
+    payload.additional_data &&
+    typeof payload.additional_data === 'object' &&
+    !Array.isArray(payload.additional_data)
       ? (payload.additional_data as Record<string, unknown>)
       : undefined
   const init = { status: response.status, code, requestId, additionalData }

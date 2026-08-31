@@ -490,6 +490,112 @@ describe('retries', () => {
     )
   })
 
+  it('terminates when the server echoes limit: 0', async () => {
+    // The regression the previous fix introduced: resolvedLimit became 0, `rows.length >= 0`
+    // was true for every page including empty ones, and iterateAll issued requests forever.
+    // Silent truncation traded for a non-terminating loop is not an improvement.
+    let calls = 0
+    const fetchImpl = (async () => {
+      calls += 1
+      if (calls > 10) throw new Error('iterateAll is looping: ' + calls + ' requests')
+      const body = { shares: [{ short_code: 'a' }], pagination: { page: calls, limit: 0, total: 120 } }
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as unknown as typeof globalThis.fetch
+
+    const shares = new CredenShare(CREDENTIAL, { fetch: fetchImpl }).shares
+    const seen: string[] = []
+    for await (const s of shares.iterateAll({ limit: 50 })) seen.push(s.shortCode)
+    // limit: 0 is ignored, so the caller's 50 governs: 1*50 < 120, 2*50 < 120, 3*50 !< 120.
+    assert.ok(calls <= 10, `must terminate promptly, made ${calls} requests`)
+    assert.ok(seen.length >= 1)
+  })
+
+  it('uses total when total_pages is absent', async () => {
+    // The middle rung of the ladder. A server capping pages to 30 while reporting total: 120
+    // and echoing limit: 50 must not read as the end after one page.
+    let calls = 0
+    const fetchImpl = (async () => {
+      calls += 1
+      const rows = calls <= 4
+        ? Array.from({ length: 30 }, (_, i) => ({ short_code: `p${calls}r${i}` }))
+        : []
+      const body = { shares: rows, pagination: { page: calls, limit: 30, total: 120 } }
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as unknown as typeof globalThis.fetch
+
+    const first = await new CredenShare(CREDENTIAL, { fetch: fetchImpl }).shares.list({ limit: 50 })
+    assert.equal(first.hasMore, true, 'page 1 of 120 rows at 30 per page is not the end')
+
+    calls = 0
+    const shares = new CredenShare(CREDENTIAL, { fetch: fetchImpl }).shares
+    const seen: string[] = []
+    for await (const s of shares.iterateAll({ limit: 50 })) seen.push(s.shortCode)
+    assert.equal(seen.length, 120, 'the whole account must be walked')
+  })
+
+  it('refuses a server that echoes a constant page number', async () => {
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({
+          shares: [{ short_code: 'a' }, { short_code: 'b' }],
+          pagination: { page: 1, limit: 2, total_pages: 9 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as unknown as typeof globalThis.fetch
+
+    const shares = new CredenShare(CREDENTIAL, { fetch: fetchImpl }).shares
+    await assert.rejects(
+      async () => {
+        let guard = 0
+        for await (const _ of shares.iterateAll({ limit: 2 })) {
+          if (++guard > 500) throw new Error('looping instead of erroring')
+        }
+      },
+      (e: unknown) => {
+        assert.ok(e instanceof ApiError)
+        assert.match(String(e), /page/)
+        return true
+      },
+    )
+  })
+
+  it('refuses a non-object additional_data rather than mistyping it', async () => {
+    // typeof [] === 'object'. Without the Array check an array arrives behind a declared
+    // Record<string, unknown>, and nothing downstream can detect it.
+    for (const value of [['a', 'b'], 'a string', 42] as unknown[]) {
+      const { fetchImpl } = recorder({
+        status: 400,
+        body: { message: 'invalid', additional_data: value },
+      })
+      await assert.rejects(
+        () => client(fetchImpl).shares.create({ title: 't', fields: [FIELD] }),
+        (error: unknown) => {
+          assert.ok(error instanceof ApiError)
+          assert.equal(error.additionalData, undefined, `accepted ${JSON.stringify(value)}`)
+          return true
+        },
+      )
+    }
+  })
+
+  it('leaves additionalData undefined when the body has no such key', async () => {
+    const { fetchImpl } = recorder({ status: 400, body: { message: 'invalid' } })
+    await assert.rejects(
+      () => client(fetchImpl).shares.create({ title: 't', fields: [FIELD] }),
+      (error: unknown) => {
+        assert.ok(error instanceof ApiError)
+        assert.equal(error.additionalData, undefined)
+        return true
+      },
+    )
+  })
+
   it('keeps paging when the server omits total_pages', async () => {
     // Treating an absent pagination block as "no more" made iterateAll return page one and
     // stop, silently reporting a fraction of the account as all of it.

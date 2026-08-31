@@ -1,15 +1,15 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.0 — released 2026-08-30
 
 First release.
 
-### Breaking, before the first release
+### Breaking, before v0.1.0
 
-Nothing is published, so nothing is pinned to a version — but this repository is public with
-no tags, so pinning to a **commit** is the only thing a consumer can do, and these two change
-what a `catch` block catches. A caught-nothing branch is silent, which is why they are here
-rather than left to be discovered.
+These landed before `v0.1.0` was tagged, so no released version ever had the old shape. They
+are recorded because both change what a `catch` block catches, and a caught-nothing branch is
+silent — the kind of thing that should be read in a changelog rather than discovered in
+production.
 
 - **Field validation throws `InvalidFieldError`, not `TypeError`.** `validateFields` and
   `create()` used bare `TypeError`s, so the blanket `catch (e) { if (e instanceof
