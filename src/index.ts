@@ -11,21 +11,41 @@ export {
   DEFAULT_BASE_URL,
   DEFAULT_LINK_ORIGIN,
   DEFAULT_MAX_RETRIES,
+  SecureRequest,
   Share,
 } from './client.js'
-export type { ClientOptions, CreateOptions, SharePage, ShareSummary } from './client.js'
+export type {
+  ClientOptions,
+  CreateOptions,
+  CreateRequestOptions,
+  DailyView,
+  PageInfo,
+  RequestDeletion,
+  RequestField,
+  RequestPage,
+  RequestSummary,
+  ShareCounts,
+  SharePage,
+  ShareSummary,
+  Stats,
+  Submission,
+  SubmissionPage,
+} from './client.js'
 
 export {
   CONTENT_KEY_LENGTH,
   FIELD_TYPES,
+  SEED_LENGTH,
   accessToken,
   custodyKeypair,
   decodeFragment,
   decryptContent,
+  decryptSubmission,
   encodeFragment,
   encryptContent,
   keypairFromSeed,
   newContentKey,
+  newSeed,
   passcodeVerifier,
   unwrapWithSeed,
   validateFields,
@@ -50,6 +70,7 @@ export {
   PermissionError,
   QuotaExceededError,
   RateLimitError,
+  RequestSeedTransmittedError,
   ServiceUnavailableError,
   WireFormatError,
 } from './errors.js'
@@ -59,8 +80,10 @@ export * as webhooks from './webhooks.js'
 /**
  * The package version.
  *
- * A second copy of a number that lives in package.json, so it drifts: this said '0.1.0' while
- * 0.1.3 was on npm, because the release guard compared the TAG to package.json and never to
- * this. A test now asserts the two agree, and it runs in the release verification.
+ * Re-exported from `client.ts` rather than declared here, because a second copy of a version
+ * number drifts: this said '0.1.0' while 0.1.3 was on npm, since the release guard compared
+ * the TAG to package.json and never to this. The User-Agent then drifted the same way on its
+ * own, still reporting 0.1.0 at 0.1.4. There is now one constant, the User-Agent is built
+ * from it, and a test asserts it equals package.json.
  */
-export const VERSION = '0.1.4'
+export { VERSION } from './client.js'

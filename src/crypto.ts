@@ -65,6 +65,13 @@ const KEY_LEN = 32
 
 /** A content key is 32 bytes. Exported so callers can check one before using it. */
 export const CONTENT_KEY_LENGTH = KEY_LEN
+
+/**
+ * A seed is 32 bytes too, and the same length as a content key on purpose: both are raw
+ * CSPRNG output that has to survive a trip through a URL fragment. Exported so a
+ * caller-supplied seed can be checked before a keypair is derived from it.
+ */
+export const SEED_LENGTH = KEY_LEN
 const PUBKEY_LEN = 65 // 0x04 || X(32) || Y(32)
 const WRAP_VERSION = 1
 
@@ -382,12 +389,77 @@ export async function passcodeVerifier(passcode: string): Promise<string> {
 
 // ── section 3: seed-derived P-256 keypairs ──────────────────────────────────────────
 
+/**
+ * A fresh 32-byte seed from the platform CSPRNG.
+ *
+ * The bytes are drawn exactly as `newContentKey()` draws them, and this exists as a separate
+ * name anyway: a seed becomes a P-256 keypair (section 3) and a content key becomes an AES
+ * key (section 2.2), so a reader should not have to know the two are interchangeable at the
+ * point where one is minted. Using a single value as both would tie a share's content to a
+ * request's identity, which is precisely the kind of coupling the info strings exist to
+ * prevent.
+ */
+export function newSeed(): Uint8Array {
+  return randomBytes(KEY_LEN)
+}
+
 export interface SeedKeypair {
   seed: Uint8Array
   scalar: bigint
   privateKey: CryptoKey
   publicKeyRaw: Uint8Array
   publicKeyB64url: string
+}
+
+/**
+ * Assemble a SeedKeypair whose three secret members are non-enumerable.
+ *
+ * `keypairFromSeed` and `custodyKeypair` shipped at 0.1.4 returning a plain object literal, so
+ * `seed`, `scalar` and `privateKey` were own enumerable properties — which means they came out of
+ * `JSON.stringify`, `{...keypair}`, `console.table`, `console.dir`, `for..in` and
+ * `Object.entries`. The seed is the read capability for every submission a request will ever
+ * collect and the scalar IS the private key, so all three had to stop appearing.
+ *
+ * Non-enumerable rather than `#private` deliberately. `keypair.seed` keeps working — it is the
+ * whole reason the function exists, and `requests.create` and `decryptSubmission` both read it —
+ * while every path that WALKS the object stops seeing it. Making them private fields instead
+ * would have broken direct access for existing 0.1.4 consumers; this only changes what
+ * enumeration yields, which is the leak.
+ *
+ * `toJSON` is the belt to that braces: without it `JSON.stringify` returns `{"publicKeyRaw":…,
+ * "publicKeyB64url":…}` and a reader might not notice the omission was deliberate.
+ */
+function sealKeypair(parts: {
+  seed: Uint8Array
+  scalar: bigint
+  privateKey: CryptoKey
+  publicKeyRaw: Uint8Array
+  publicKeyB64url: string
+}): SeedKeypair {
+  const kp = {
+    publicKeyRaw: parts.publicKeyRaw,
+    publicKeyB64url: parts.publicKeyB64url,
+  } as SeedKeypair
+
+  for (const [key, value] of [
+    ['seed', parts.seed],
+    ['scalar', parts.scalar],
+    ['privateKey', parts.privateKey],
+  ] as const) {
+    Object.defineProperty(kp, key, { value, enumerable: false, writable: false, configurable: false })
+  }
+
+  const redacted = () =>
+    `SeedKeypair(${parts.publicKeyB64url.slice(0, 12)}…, seed/scalar/privateKey withheld)`
+  for (const [key, value] of [
+    ['toJSON', () => ({ publicKeyB64url: parts.publicKeyB64url, seed: '[redacted]', scalar: '[redacted]', privateKey: '[redacted]' })],
+    ['toString', redacted],
+    [Symbol.for('nodejs.util.inspect.custom'), redacted],
+  ] as const) {
+    Object.defineProperty(kp, key, { value, enumerable: false, writable: false, configurable: false })
+  }
+
+  return kp
 }
 
 function bigintToBytes(value: bigint, length: number): Uint8Array {
@@ -442,13 +514,13 @@ export async function keypairFromSeed(seed: Uint8Array): Promise<SeedKeypair> {
     ['deriveBits'],
   )
 
-  return {
+  return sealKeypair({
     seed,
     scalar,
     privateKey,
     publicKeyRaw,
     publicKeyB64url: b64url(publicKeyRaw),
-  }
+  })
 }
 
 /**
@@ -645,4 +717,28 @@ export async function unwrapWithSeed(wrapped: string, seed: Uint8Array): Promise
   } catch {
     throw new WireFormatError('could not unwrap: wrong recipient key, or the wrap was altered')
   }
+}
+
+/**
+ * Open a secure-request submission with the seed kept when the request was created.
+ *
+ * A submission blob is a section 4 wrap whose payload is the same JSON field array a share
+ * carries, so this is `unwrapWithSeed` plus the parse. The parse is here rather than left to
+ * the caller because a primitive returning bytes invites a hand-rolled `TextDecoder` at
+ * every call site, and one of them will forget that the result is a field array and not an
+ * object.
+ *
+ * THE ENCODING, which is the trap on this feature. A submission's `data` is STANDARD base64,
+ * padded, because it travels inside a JSON body. A request's `public_key` is base64url,
+ * UNPADDED, because it was minted to travel in a URL. Two alphabets on two halves of one
+ * feature: feed this the base64url decoder and you get bytes that will not open, and the
+ * failure reads as a wrong key rather than as a wrong decoder.
+ */
+export async function decryptSubmission(data: string, seed: Uint8Array): Promise<Field[]> {
+  const plaintext = await unwrapWithSeed(data, seed)
+  const parsed: unknown = JSON.parse(textDecoder.decode(plaintext))
+  if (!Array.isArray(parsed)) {
+    throw new WireFormatError('a decrypted submission is not a field array')
+  }
+  return parsed as Field[]
 }

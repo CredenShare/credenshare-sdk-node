@@ -1,6 +1,6 @@
 {
   "name": "@credenshare/sdk",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "End-to-end encrypted secret sharing. Encryption happens on your machine.",
   "license": "Apache-2.0",
   "type": "module",
@@ -40,6 +40,7 @@
     "test": "node scripts/run-tests.mjs",
     "typecheck": "tsc --noEmit",
     "conformance": "node --import tsx src/conformance-cli.ts -v",
+    "seed-sweep": "node --import tsx scripts/seed-sweep.ts",
     "prepare": "npm run build",
     "prepublishOnly": "npm test"
   },

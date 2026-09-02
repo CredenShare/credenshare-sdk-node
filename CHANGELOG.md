@@ -1,5 +1,86 @@
 # Changelog
 
+## 0.2.0 — 2026-09-02
+
+Secure requests: a keyless collect link a human fills in, whose keypair is minted here and
+whose private seed is never transmitted. Additive — nothing on the shares surface changed
+shape or behaviour.
+
+### Added
+
+- **`crs.requests`** — `create`, `list`, `iterateAll`, `get`, `delete`, `submissions`,
+  `iterateSubmissions` and `decryptSubmission`. `create()` mints a P-256 keypair from a
+  32-byte seed, registers the PUBLIC half, and hands the seed back in `SecureRequest.seed`.
+  The seed is never sent, which is what makes one submitter unable to read another's
+  submission and CredenShare unable to read any of them.
+- **`SecureRequest.collectLink` / `.accessLink`, and `crs.collectLinkFor(shortCode)` /
+  `crs.accessLinkFor(shortCode, seed)`** — the keyless link you hand out, and your own link
+  with the seed in the fragment. The fragment is version-prefixed (`"1" + base64url`), which
+  is where hand-assembly goes wrong.
+- **`crs.stats.get()`** — the account's counts and daily view series, scoped to the
+  organization when the key acts in one, returning `Stats { shares, dailyViews }`.
+- **`decryptSubmission(data, seed)`, `newSeed()` and `SEED_LENGTH`** at the package root, for
+  a caller holding a blob and no client.
+- **`RequestSeedTransmittedError`** — raised at the boundary, before any bytes leave, when the
+  seed appears anywhere in what is about to be sent.
+- An `Idempotency-Key` is now attached to a **POST, PUT or PATCH** made through
+  `crs.request()`, generated once before the retry loop and deferring case-insensitively to a
+  key you supplied. Those are the methods where a retry could create a second thing, and the
+  ones the API consults the header on. A GET and a DELETE get nothing added — notably
+  `shares.expire()`, whose `DELETE /shares/{code}` therefore sends exactly the bytes 0.1.4
+  sent. A key the CALLER supplies is still forwarded on any method, untouched.
+
+### Fixed
+
+- **`iterateSubmissions()` did not terminate against the deployed endpoint.** The submissions
+  handler ignores `page` and `limit` and answers `{submissions, count}` with no pagination
+  block, and the shared paging ladder's last rung infers "there is more" from a page as long
+  as the limit — an inference that is true forever when no paging figures ever arrive. A
+  request holding at least the walk's page size re-requested page one up to `MAX_PAGES`
+  times, re-yielding every sealed submission on each pass, and then threw. `submissions()`
+  now takes no `page` or `limit`, returns the whole set plus the API's own `count`, and
+  `iterateSubmissions()` is one HTTP call.
+- **The seed assertion did not cover the Idempotency-Key header.** It scanned the serialized
+  body and resolved the key afterwards, so `create({ seed, idempotencyKey: b64url(seed) })`
+  put the seed on the wire in a header and raised nothing. The key is now resolved first and
+  scanned with the body.
+- **The seed assertion missed the unpadded standard-base64 spelling.** 32 bytes are 43 base64
+  characters plus one `=`, so a search for the padded form does not match the unpadded one;
+  the list read as complete at three entries while covering two spellings. Both base64
+  entries are now unpadded, and an unpadded string is a prefix of its padded form.
+- **`RequestDeletion.outcome` reported `'expired'` for an answer that said nothing.** It is
+  `'expired' | 'deleted' | null` now, and an unrecognised or absent value is `null`. An
+  outcome the SDK invented is otherwise indistinguishable from one the server sent, on the
+  only destructive call in this surface.
+- **`Submission.expiredAt` is gone.** The handler returns `short_code`, `created_at`, `data`
+  and `encryption_type` and never an expiry; `openapi.yaml` documents one and is wrong. A
+  property that is always `null` reads as a broken field rather than an absent one.
+- **The User-Agent no longer reports a version this package has not been for four releases.**
+  It said `credenshare-node/0.1.0` at 0.1.4. `VERSION` is now declared once, in `client.ts`,
+  re-exported from `index.ts`, and the User-Agent is built from it.
+
+### Changed
+
+- `RequestField`'s doc no longer claims unknown members are passed through. The server
+  unmarshals a request field into `{item, type}` and discards the rest — unlike a *share's*
+  fields, whose extras survive inside the ciphertext. Extras are accepted without error and
+  not stored, and the docs and README now say so.
+- `Stats` is the name of the stats DTO (it was `AccountStats`), matching the sibling SDKs.
+- **The one `util.inspect` flag combination that still renders a request's seed is now
+  documented rather than left to be discovered.** `SecureRequest.seed` and `.accessLink` are
+  getters over private fields, so `JSON.stringify`, spread, `structuredClone`,
+  `console.log`/`dir`/`table`, `for..in`, `getOwnPropertyDescriptors` and template
+  interpolation all render the short code and nothing secret. But
+  `util.inspect(request, { getters: true, showHidden: true, customInspect: false })` prints
+  the 32 bytes: `showHidden` exposes a prototype accessor to the walk, `getters` invokes it,
+  and `customInspect: false` discards the redacting hook. No getter can obey that and
+  withhold its value, and the same combination renders any getter-backed secret in any
+  library, so it is stated in the getter's doc comment and in the README instead of being
+  worked around. `scripts/seed-sweep.ts` (`npm run seed-sweep`) runs the whole list and
+  greps each rendering for the seed in five encodings, and a test asserts both directions —
+  that every other path is clean, and that this one is not.
+
+
 ## 0.1.4 — released 2026-08-30
 
 The first version whose install instructions are the registry ones, because 0.1.3 is on the

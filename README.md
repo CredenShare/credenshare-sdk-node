@@ -107,11 +107,189 @@ There is deliberately **no method to read a share over the API**. The recipient 
 protected by proof-of-work and captcha gates that bearer auth skips, so exposing it to a
 credential would be an enumeration bypass. Open the link in a browser.
 
+## Secure requests
+
+A secure request is a keyless collect link a human fills in. **You generate the keypair** —
+this client mints it, registers the public half, and hands you the seed:
+
+```ts
+const request = await crs.requests.create({
+  title: 'Onboarding credentials for Dana',
+  fields: [
+    { item: 'Staging database password', type: 'password' },
+    { item: 'VPN config', type: 'multiline' },
+  ],
+})
+
+request.collectLink // https://crs.sh/r/aB3dEf12       — hand this to the human
+request.accessLink  // https://crs.sh/r/aB3dEf12#1x…   — keep this; it carries the seed
+request.seed        // the 32 bytes that link carries
+```
+
+**The seed is never transmitted, and it is the only way to read the submissions.** Store it,
+or store the access link that carries it. Lose both and the submissions are unreadable by
+everyone, CredenShare included — that is the point, and it is also the failure mode, so decide
+where the seed goes before you create anything in production.
+
+### Printing a request does not print its seed
+
+`seed` and `accessLink` are getters over private fields rather than own properties, so the
+ordinary ways an object ends up in a log find nothing to render. Every one of these prints the
+short code and no secret:
+
+```ts
+JSON.stringify(request)                            // seed: '[redacted]'
+JSON.stringify({ nested: request })                // same, at any depth
+{ ...request }                                     // no seed member at all
+structuredClone(request)                           // no seed member at all
+console.log(request)                               // SecureRequest(aB3dEf12, seed redacted)
+console.log('%o', request); console.log('%s', request)
+console.dir(request, { depth: null })              // own properties only
+console.table(request); console.table([request])   // columns from own properties only
+util.inspect(request, { customInspect: false })
+util.inspect(request, { customInspect: false, showHidden: true })   // [seed]: [Getter]
+for (const k in request) { /* shortCode, publicKey, collectLink, … */ }
+Object.keys(request); Object.entries(request)
+Object.getOwnPropertyDescriptors(request)          // no seed descriptor
+`${request}`; String(request)                      // SecureRequest(aB3dEf12, seed redacted)
+```
+
+That list is a runnable script in this SDK's repository — `scripts/seed-sweep.ts`, via
+`npm run seed-sweep` on a clone. It creates a request with a known seed and greps every
+rendering for those bytes in base64url, base64 (padded and unpadded), hex and as a decimal
+byte run, printing each rendering with its verdict. The test suite asserts the same thing in
+both directions: that every path above is clean, and that the one below is not.
+
+**One exception, and it is the caller's explicit instruction rather than a gap here:**
+
+```ts
+util.inspect(request, { getters: true, showHidden: true, customInspect: false })
+// prints the seed's 32 bytes, and the access link beside them
+```
+
+All three flags are load-bearing. `showHidden: true` is what exposes a prototype accessor to
+the walk at all — which is why the two-flag `{ getters: true, customInspect: false }` is clean,
+since `seed` is a class accessor and `util.inspect` otherwise walks only own properties.
+`getters: true` then calls it instead of printing `[Getter]`. `customInspect: false` throws
+away the redacting hook that would have answered first. Together they say "ignore this
+object's own opinion about how to render itself, and call every accessor on it".
+
+There is no way for a getter to obey that and withhold its value, so this is documented rather
+than defended against. It is not particular to this SDK — that combination renders any
+getter-backed secret in any library. Keep it away from anything whose output reaches a log.
+
+A `Share` is a weaker guarantee, and knowingly so: `link` and `contentKey` are own properties
+on a shape published at 0.1.x, so `toJSON`, `toString` and the inspect hook redact them but
+`console.table` and `{ ...share }` still show them. Do not put a `Share` in a structured
+logger either.
+
+A field's prompt is `item`. A *share's* field labels itself `key`, this one SDK carries both
+spellings, and the wrong one is refused locally: the server accepts it, answers 201 with a
+live short code, and the collect form then renders with no prompts on it.
+
+A prompt is `{ item, type }` and nothing else is stored. An extra member is accepted without
+error and then discarded — the server keeps `item` and `type`. Unlike a *share's* fields, whose
+extras survive because they sit inside the ciphertext, a request's prompts are plaintext
+metadata, so do not put anything in one that you need to read back.
+
+Submissions come back **sealed**:
+
+```ts
+const all = await crs.requests.submissions(request.shortCode)
+for (const submission of all.submissions) {
+  const fields = await crs.requests.decryptSubmission(submission, request.seed)
+  // Handle these; do not print them. The plaintext a human just handed over does not belong
+  // in stdout or in whatever ships your logs — which is the same reason submissions() does
+  // not decrypt for you.
+}
+```
+
+`submissions()` does not decrypt, on purpose. Decrypting on fetch would put every credential a
+human handed over into memory — and into whatever logged the result — for a caller who only
+wanted to count them.
+
+**This endpoint is not paginated,** so `submissions()` takes no `page` or `limit` and returns
+every row in one call, alongside the server's own `all.count`. `iterateSubmissions()` is the
+row-at-a-time spelling of exactly that one call, not a walk.
+
+`all.skippedNotEndToEndEncrypted` counts submissions the server withheld because they predate
+E2EE and are readable server-side. Withheld rather than returned, so a bearer credential is
+never a way to read plaintext; counted rather than dropped, so a shorter list than your
+dashboard shows has a visible reason.
+
+Two encodings meet on this feature and they are **not** the same alphabet. A request's
+`public_key` is base64url and unpadded, because it was minted to travel in a URL; a
+submission's `data` is standard base64 and padded, because it travels in a JSON body.
+`decryptSubmission` feeds the blob the right decoder — if you ever decode one by hand, this is
+the paragraph to reread, because getting it wrong fails as "wrong key" rather than as "wrong
+decoder".
+
+`delete` is **two steps**, and it says which one happened:
+
+```ts
+(await crs.requests.delete('aB3dEf12')).outcome // 'expired' — submissions preserved
+(await crs.requests.delete('aB3dEf12')).outcome // 'deleted' — gone
+```
+
+A loop that calls it until it stops erroring destroys the submissions. That is why the outcome
+is returned rather than a bare 200.
+
+`outcome` is `null` if the server did not say. It always does today, so treat `null` as "go and
+check" — it is deliberately not reported as `'expired'`, because an outcome this SDK invented
+would then be indistinguishable from one the server sent, on the one destructive call here.
+
+### Turning a stored seed back into a link
+
+```ts
+crs.collectLinkFor('aB3dEf12')        // https://crs.sh/r/aB3dEf12       — hand out
+crs.accessLinkFor('aB3dEf12', seed)   // https://crs.sh/r/aB3dEf12#1x…   — keep
+```
+
+The same two links `create()` returns, for a seed you stored yourself. Hand-assembling the
+access link is where this goes wrong: the fragment is version-prefixed, not bare base64url, and
+a link with the prefix missing loads a page that cannot decrypt anything.
+
+### A reproducible keypair
+
+An ephemeral runner can derive its seed from the third part of its credential rather than
+storing one:
+
+```ts
+import { custodyKeypair } from '@credenshare/sdk'
+
+const { seed } = await custodyKeypair(custodySecret)
+const request = await crs.requests.create({ title: 't', fields: [/* … */], seed })
+```
+
+Every container derives the same keypair, so there is nothing to store and nothing to sync.
+The trade is compartmentalisation: one seed then opens every request created under it, where a
+fresh seed per request opens exactly one. Pass a seed when statelessness is worth that, and
+not by default.
+
+## Stats
+
+```ts
+const stats = await crs.stats.get()
+stats.shares.active
+stats.dailyViews // [{ date: '2026-08-31', count: 0 }, …] oldest first, zero-filled
+```
+
+Scoped to the organization when the key acts in one, which is the answer a seat member's
+automation is actually asking for. The per-member breakdown the dashboard shows is deliberately
+absent from the API: a key scoped to read statistics should not become a way to enumerate
+colleagues.
+
+Absent figures read as `0` and an absent series as `[]`, never as `undefined` — a caller who
+has to tell "no data" from "field missing" apart will get it wrong, and a new account genuinely
+has no views yet.
+
 ## Idempotency and retries
 
 Every create carries an `Idempotency-Key`. It exists so a **network** retry cannot leave a
 second copy of a credential in the world, with its own link and audit trail, that you do not
 know about. This client performs those retries itself, repeating the byte-identical request.
+A delete carries no such header, and deliberately: repeating one has the same effect as making
+it once.
 
 Passing your own `idempotencyKey` does **not** make a second `create()` a no-op, and no
 argument makes it one: encryption is randomised per call — a fresh salt and IV every time,
@@ -120,6 +298,24 @@ which AES-GCM requires — so the body differs and the API refuses with
 
 Only connection and timeout failures are retried. A 5xx is surfaced, because it may have
 committed and this client cannot tell.
+
+`crs.request(method, path, { body, query, headers })` is the escape hatch for anything this
+SDK does not model yet. It gets the same timeout, the same bounded retries, the same error
+mapping and the same custody assertion as the typed methods.
+
+A **POST, PUT or PATCH** made through it gets an `Idempotency-Key` when you did not supply
+one — attached once, before the retry loop, so a retry repeats that key rather than minting a
+second. Those are the methods where a retry could create a second thing, and they are the ones
+the API consults the header on.
+
+A **GET or DELETE gets nothing added.** Neither reads the header, a DELETE is idempotent by
+construction, and `shares.expire()` is a `DELETE /shares/{code}` that shipped at 0.1.4 without
+one — adding a header to an already-published call to buy nothing is a wire change, not a fix.
+A key you *do* supply is sent on **any** method, exactly as you wrote it, matched
+case-insensitively.
+
+What the escape hatch does not do is encrypt: a body you build there is sent as you wrote it,
+so nothing secret belongs in one.
 
 ---
 
@@ -231,8 +427,9 @@ fixes:
 | `NetworkError` | the API was never reached | nothing was sent. `err.attempts` says how many tries |
 | `DeliveryUnknownError` | delivered, but no response was read | it may have committed. Repeat the identical request — a fresh key here is how one secret becomes two |
 | `IdempotencyInFlightError` | the identical request is still running | wait briefly, then repeat it unchanged |
-| `InvalidFieldError` | a field is not `{ key, value, type }` | `key` is the visible label — not `label`, `name` or `title` |
-| `NotFoundError` | no such share, or not yours | a code from another account reads exactly like one that never existed |
+| `InvalidFieldError` | a field is not `{ key, value, type }`, or a request prompt is not `{ item }` | a share labels its field `key`; a request prompt is `item`. Not `label`, `name` or `title` |
+| `RequestSeedTransmittedError` | a request seed was about to be sent | expire that request and create a new one; a seed that reached the server is no longer zero-knowledge |
+| `NotFoundError` | no such share or request, or not yours | a code from another account reads exactly like one that never existed |
 | `ApiError` | any other refusal | the base class — `err.status`, `err.code`, `err.requestId` carry the detail |
 
 ## Licence

@@ -28,53 +28,7 @@ import {
   RateLimitError,
   ServiceUnavailableError,
 } from '../src/errors.js'
-
-const CREDENTIAL = 'crs_sk_live_abc123.authsecretvalue.custodysecretvalue'
-const TWO_PART = 'crs_sk_live_abc123.authsecretvalue'
-
-interface Recorded {
-  url: string
-  method: string
-  headers: Record<string, string>
-  body?: string
-}
-
-function recorder(
-  responses: Array<{ status: number; body: unknown; headers?: Record<string, string> }> | {
-    status: number
-    body: unknown
-    headers?: Record<string, string>
-  },
-) {
-  const queue = Array.isArray(responses) ? [...responses] : null
-  const single = Array.isArray(responses) ? null : responses
-  const requests: Recorded[] = []
-
-  const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
-    requests.push({
-      url: String(url),
-      method: init?.method ?? 'GET',
-      headers: Object.fromEntries(
-        Object.entries((init?.headers ?? {}) as Record<string, string>).map(([k, v]) => [
-          k.toLowerCase(),
-          v,
-        ]),
-      ),
-      body: typeof init?.body === 'string' ? init.body : undefined,
-    })
-    const next = single ?? queue!.shift()!
-    return new Response(JSON.stringify(next.body), {
-      status: next.status,
-      headers: { 'content-type': 'application/json', ...(next.headers ?? {}) },
-    })
-  }) as unknown as typeof globalThis.fetch
-
-  return { requests, fetchImpl }
-}
-
-function client(fetchImpl: typeof globalThis.fetch, credential = CREDENTIAL): CredenShare {
-  return new CredenShare(credential, { fetch: fetchImpl, linkOrigin: 'https://crs.sh' })
-}
+import { CREDENTIAL, TWO_PART, client, recordOf, recorder, type Recorded } from './harness.js'
 
 const FIELD = { key: 'k', value: 'v', type: 'text' as const }
 
@@ -256,11 +210,17 @@ describe('reads', () => {
     assert.equal(requests.length, 3)
   })
 
-  it('issues a DELETE to expire', async () => {
+  it('issues a DELETE to expire, and carries no Idempotency-Key on it', async () => {
+    // The header is asserted ABSENT, and that is the point of the assertion rather than an
+    // omission from it. This call shipped at 0.1.4 as a bare DELETE; the endpoint does not
+    // read the header, a repeated delete is idempotent by construction, and adding one would
+    // change the bytes of a published call to buy nothing. The auto-key covers POST, PUT and
+    // PATCH only.
     const { requests, fetchImpl } = recorder({ status: 200, body: {} })
     await client(fetchImpl).shares.expire('a1')
     assert.equal(requests[0].method, 'DELETE')
     assert.ok(requests[0].url.endsWith('/shares/a1'))
+    assert.equal(requests[0].headers['idempotency-key'], undefined)
   })
 
   it('refuses the recipient read path with a reason', async () => {
@@ -319,17 +279,7 @@ describe('retries', () => {
     // into a hard failure.
     const seen: Recorded[] = []
     const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
-      seen.push({
-        url: String(url),
-        method: init?.method ?? 'GET',
-        headers: Object.fromEntries(
-          Object.entries((init?.headers ?? {}) as Record<string, string>).map(([k, v]) => [
-            k.toLowerCase(),
-            v,
-          ]),
-        ),
-        body: typeof init?.body === 'string' ? init.body : undefined,
-      })
+      seen.push(recordOf(url, init))
       if (seen.length === 1) throw new TypeError('fetch failed')
       return new Response(JSON.stringify({ short_code: 'xy12' }), { status: 201 })
     }) as unknown as typeof globalThis.fetch

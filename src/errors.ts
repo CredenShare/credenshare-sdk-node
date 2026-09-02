@@ -56,6 +56,18 @@ export class CredentialFormatError extends CredenShareError {}
 export class CustodySecretTransmittedError extends CredenShareError {}
 
 /**
+ * A secure request's private seed was about to be transmitted.
+ *
+ * The mirror of {@link CustodySecretTransmittedError}, for the other secret this SDK holds
+ * that the server must never see. A request's seed IS the ability to read its submissions:
+ * the public half is published so submitters can seal to it, and the seed stays with the
+ * caller, which is what makes one submitter unable to read another's and us unable to read
+ * any of them. If it reaches the wire that property is gone, and the remedy is to expire the
+ * request and create a new one under a new seed — not to retry.
+ */
+export class RequestSeedTransmittedError extends CredenShareError {}
+
+/**
  * A field object is not shaped the way the wire format requires.
  *
  * Its own class rather than a TypeError so that a blanket `catch (e) { if (e instanceof
