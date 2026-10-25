@@ -103,6 +103,20 @@ describe('properties of this implementation, not of the fixture', () => {
     }
   })
 
+  it('lists the eight field types the app renders, and requires only that one is present', () => {
+    // url and qr reached the app on 2026-10-24. The type rides inside the ciphertext, so the
+    // server never sees it and this SDK does not police it: the 2,300-character QR limit is
+    // the app editor's, not a wire rule.
+    assert.deepEqual(
+      [...crypto.FIELD_TYPES],
+      ['text', 'password', 'date', 'multiline', 'markdown', 'source_code', 'url', 'qr'],
+    )
+    crypto.validateFields([
+      { key: 'Docs', value: 'not a link', type: 'url' },
+      { key: 'Wi-Fi', value: 'x'.repeat(2301), type: 'qr' },
+    ])
+  })
+
   it('preserves unknown members, so a newer sender does not break an older reader', async () => {
     const key = crypto.newContentKey()
     const fields = [{ key: 'k', value: 'v', type: 'text', futureThing: { a: 1 } }]

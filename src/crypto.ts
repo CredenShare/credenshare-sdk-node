@@ -33,7 +33,11 @@ import {
   WireFormatError,
 } from './errors.js'
 
-/** Field types the recipient view knows how to render (section 2.2.1). */
+/**
+ * Field types the recipient view knows how to render (section 2.2.1). `url` is a link, made
+ * clickable only for an absolute http(s) address; `qr` is text drawn as a QR code, at most
+ * 2,300 characters. Neither is checked here: `validateFields` only requires a `type`.
+ */
 export const FIELD_TYPES = [
   'text',
   'password',
@@ -41,6 +45,8 @@ export const FIELD_TYPES = [
   'multiline',
   'markdown',
   'source_code',
+  'url',
+  'qr',
 ] as const
 
 export type FieldType = (typeof FIELD_TYPES)[number]
