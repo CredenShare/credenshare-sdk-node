@@ -11,14 +11,22 @@ export {
   DEFAULT_BASE_URL,
   DEFAULT_LINK_ORIGIN,
   DEFAULT_MAX_RETRIES,
+  NOTIFY_ON_EVENTS,
   SecureRequest,
   Share,
+  UNLIMITED,
 } from './client.js'
 export type {
+  AccessLogEntry,
+  AccessLogOptions,
+  AccessLogPage,
+  Capabilities,
   ClientOptions,
   CreateOptions,
   CreateRequestOptions,
   DailyView,
+  ListStatus,
+  NotifyEvent,
   PageInfo,
   RequestDeletion,
   RequestField,
@@ -62,6 +70,7 @@ export {
   DeliveryUnknownError,
   IdempotencyConflictError,
   IdempotencyInFlightError,
+  InvalidArgumentError,
   InvalidFieldError,
   NetworkError,
   MalformedKeyError,
@@ -76,6 +85,17 @@ export {
 } from './errors.js'
 
 export * as webhooks from './webhooks.js'
+
+export {
+  Generated,
+  PASSPHRASE_SEPARATORS,
+  PASSWORD_SYMBOLS,
+  generatePassphrase,
+  generatePassword,
+  generatePin,
+  strengthOf,
+} from './generate.js'
+export type { PassphraseOptions, PassphraseSeparator, PasswordOptions } from './generate.js'
 
 /**
  * The package version.

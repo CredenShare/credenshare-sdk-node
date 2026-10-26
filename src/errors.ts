@@ -75,6 +75,16 @@ export class RequestSeedTransmittedError extends CredenShareError {}
  */
 export class InvalidFieldError extends CredenShareError {}
 
+/**
+ * An argument was refused before anything was sent or generated: a `notifyOn` event the API
+ * does not know, a list status other than active or expired, access-log options out of range,
+ * or generator options out of range.
+ *
+ * Separate from `InvalidFieldError`, which is about a field object, so each keeps a
+ * description that fits all its call sites.
+ */
+export class InvalidArgumentError extends CredenShareError {}
+
 export interface ApiErrorInit {
   status?: number
   code?: number

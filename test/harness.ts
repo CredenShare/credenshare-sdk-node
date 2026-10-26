@@ -53,7 +53,9 @@ export function recorder(responses: StubResponse[] | StubResponse) {
   const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
     requests.push(recordOf(url, init))
     const next = single ?? queue!.shift()!
-    return new Response(JSON.stringify(next.body), {
+    // A 204 or 304 cannot carry a body; the platform Response refuses to build one that does.
+    const nullBody = next.status === 204 || next.status === 304
+    return new Response(nullBody ? null : JSON.stringify(next.body), {
       status: next.status,
       headers: { 'content-type': 'application/json', ...(next.headers ?? {}) },
     })

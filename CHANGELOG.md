@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+The /v1 additions of Gitea #404 (who opened a share, what a key may do, the expired lists and
+activity emails) and a local generator. Additive: every existing call sends the bytes it sent in
+0.3.0, and the conformance fixture is byte-identical.
+
+### Added
+
+- **`crs.shares.accessLog(code, options)` and `crs.shares.iterateAccessLog(code, options)`**: a
+  share's access log, newest first, with `limit`, `cursor`, `from`, `to` (strings or Dates) and
+  `ifNoneMatch`, returning `AccessLogPage` and `AccessLogEntry`. Needs the `audit:read` scope.
+  The walk follows `nextCursor` and throws `ApiError` if a cursor fails to move.
+- **`crs.capabilities.get()`**: the key's scopes, its plan's limits and features, the team's
+  sharing policy for a team key, and the field types and activity-email events the API accepts.
+- **Conditional reads.** Both return an `etag`; passed back as `ifNoneMatch`, an unchanged answer
+  comes back with `notModified: true`. A 304 never throws on these two, and still does
+  everywhere else, `request()` included, where an empty result would read as a real one.
+- **`status: 'active' | 'expired'`** on `shares.list`, `shares.iterateAll`, `requests.list` and
+  `requests.iterateAll`. Left out, nothing new is sent.
+- **`notifyOn`** on `shares.create`, with `NOTIFY_ON_EVENTS`, checked as the API checks it.
+- **`generatePassword`, `generatePassphrase`, `generatePin` and `strengthOf`**: the app's
+  generator, on this machine, with nothing sent. Rejection-sampled draws from
+  `crypto.getRandomValues`, the EFF long word list embedded byte-for-byte (attributed in
+  NOTICE), and the app's strength figures. A `Generated` withholds its value from printing,
+  `inspect` and `JSON.stringify`.
+- **`InvalidArgumentError`**, for an argument refused before anything was sent or generated;
+  and `UNLIMITED` (-1).
+
 ## 0.3.0 — 2026-10-25
 
 The two field types the web app gained on 2026-10-24. Nothing here changes behaviour: a field's

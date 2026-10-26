@@ -16,6 +16,7 @@ import {
   DeliveryUnknownError,
   IdempotencyConflictError,
   IdempotencyInFlightError,
+  InvalidArgumentError,
   InvalidFieldError,
   MalformedKeyError,
   NetworkError,
@@ -331,6 +332,111 @@ export interface CreateOptions {
   /** A wrap you computed yourself. Mutually exclusive with `custody`. */
   itemKeyWrap?: string
   organizationId?: string
+  /**
+   * Email the share's creator when it is viewed, when a view is refused, when it expires or
+   * when it is deleted: any of `NOTIFY_ON_EVENTS`, each at most once. The same choice as the
+   * app's "Email me when". Checked before anything is encrypted or sent, as the API checks it.
+   */
+  notifyOn?: readonly NotifyEvent[]
+}
+
+/** The events `CreateOptions.notifyOn` accepts, in the API's order. */
+export const NOTIFY_ON_EVENTS = ['viewed', 'denied', 'expired', 'deleted'] as const
+export type NotifyEvent = (typeof NOTIFY_ON_EVENTS)[number]
+
+/** The active or the expired half of the share and request lists. */
+export type ListStatus = 'active' | 'expired'
+
+/** What a limit reads when the plan sets none, in `Capabilities.limits` and `retentionDays`. */
+export const UNLIMITED = -1
+
+/** One read of a share's access log. Every member is optional. */
+export interface AccessLogOptions {
+  /** 1 to 100. Left out, the API answers 50. */
+  limit?: number
+  /** A previous page's `nextCursor`, to read further back. Opaque. */
+  cursor?: string
+  /**
+   * Bounds on the entries' times, as RFC 3339 strings or Dates. The plan's retention still
+   * applies: nothing older than `retentionDays` comes back, whatever `from` says.
+   */
+  from?: string | Date
+  to?: string | Date
+  /**
+   * An `etag` from an earlier page. An unchanged page comes back with `notModified` set rather
+   * than as an error.
+   */
+  ifNoneMatch?: string
+}
+
+/** One opening of a share. */
+export interface AccessLogEntry {
+  /** RFC 3339, as the API sent it. */
+  accessedAt: string
+  accessedIp: string
+  platform: string
+  /** The raw user agent, or null when none was recorded. Link previews show up here. */
+  userAgent: string | null
+  /** The viewer entered a wrong passcode. */
+  failedPasscode: boolean
+  /** The viewer was signed in to CredenShare. Whose account it was is not disclosed. */
+  signedIn: boolean
+}
+
+/** One page of a share's access log, newest first. */
+export interface AccessLogPage {
+  shortCode: string
+  entries: AccessLogEntry[]
+  /** Reads the next, older page. Null on the last page. */
+  nextCursor: string | null
+  hasMore: boolean
+  /** The plan's access-log retention in days, or `UNLIMITED`. */
+  retentionDays: number
+  /**
+   * The window the API applied after retention. When `from` and `to` are not set they move
+   * with the clock, so the `etag` of an unbounded read changes from one second to the next.
+   */
+  effectiveFrom: string | null
+  effectiveTo: string | null
+  etag: string | null
+  /**
+   * The API answered 304 to `ifNoneMatch`: the page already held is still current, and
+   * nothing here but `shortCode` and `etag` is set.
+   */
+  notModified: boolean
+}
+
+/** What a credential may do. */
+export interface Capabilities {
+  apiVersion: string
+  key: {
+    keyId: string
+    scopes: string[]
+    custodyLevel: number
+    /** The team a team key acts in, or null for a personal key. */
+    organizationId: string | null
+    rateLimitRpm: number
+  }
+  /** The plan behind the key: the team's for a team key, the account's otherwise. */
+  plan: { code: string; name: string }
+  /** Any negotiated override included. `UNLIMITED` (-1) means the plan sets none. */
+  limits: {
+    maxShares: number
+    remainingShares: number
+    maxFields: number
+    maxDaysAccessLogs: number
+    maxApiKeys: number
+    maxWebhooks: number
+  }
+  /** The plan's switches by the API's own names, such as `secure_requests`. */
+  features: Record<string, boolean>
+  /** The team's sharing policy for a team key, in the API's shape; null for a personal key. */
+  sharingPolicy: Record<string, unknown> | null
+  fieldTypes: string[]
+  notifyOnEvents: string[]
+  etag: string | null
+  /** The API answered 304 to `ifNoneMatch`; nothing but `etag` is set. */
+  notModified: boolean
 }
 
 /**
@@ -682,6 +788,14 @@ interface ApiPayload {
   [key: string]: unknown
 }
 
+interface Exchanged {
+  data: ApiPayload
+  etag: string | null
+  notModified: boolean
+}
+
+const exchange = Symbol('exchange')
+
 export class CredenShare {
   readonly credential: Credential
   readonly #baseUrl: string
@@ -693,6 +807,7 @@ export class CredenShare {
   readonly shares: Shares
   readonly requests: Requests
   readonly stats: StatsClient
+  readonly capabilities: CapabilitiesClient
 
   constructor(credential: string, options: ClientOptions = {}) {
     this.credential = Credential.parse(credential)
@@ -704,6 +819,7 @@ export class CredenShare {
     this.shares = new Shares(this)
     this.requests = new Requests(this)
     this.stats = new StatsClient(this)
+    this.capabilities = new CapabilitiesClient(this)
   }
 
   /**
@@ -774,6 +890,25 @@ export class CredenShare {
     path: string,
     init: { body?: unknown; query?: Record<string, string | number>; headers?: Record<string, string> } = {},
   ): Promise<ApiPayload> {
+    return (await this[exchange](method, path, init, false)).data
+  }
+
+  /**
+   * `request` with the envelope kept, for the typed conditional reads. With
+   * `acceptNotModified`, a 304 is an answer rather than an error: the caller sent
+   * `If-None-Match`, and "unchanged" is what it asked. Keyed by a symbol this module does not
+   * export, so it is not part of the public surface.
+   */
+  async [exchange](
+    method: string,
+    path: string,
+    init: {
+      body?: unknown
+      query?: Record<string, string | number>
+      headers?: Record<string, string>
+    },
+    acceptNotModified: boolean,
+  ): Promise<Exchanged> {
     const authorization = `Bearer ${this.credential.bearer}`
     // Belt and braces. `bearer` is assembled from parts so a custody secret cannot reach the
     // header, but this asserts the property at the boundary rather than trusting a
@@ -860,6 +995,11 @@ export class CredenShare {
         clearTimeout(timer)
       }
 
+      const etag = response.headers.get('etag')
+      if (acceptNotModified && response.status === 304) {
+        return { data: {}, etag, notModified: true }
+      }
+
       let parsed: ApiPayload = {}
       if (text) {
         try {
@@ -868,7 +1008,7 @@ export class CredenShare {
           parsed = {}
         }
       }
-      if (response.ok) return parsed
+      if (response.ok) return { data: parsed, etag, notModified: false }
       throw errorFor(response, parsed, text)
     }
   }
@@ -889,6 +1029,7 @@ class Shares {
    * refuses those rather than letting the mistake through.
    */
   async create(options: CreateOptions): Promise<Share> {
+    validateNotifyOn(options.notifyOn)
     const contentKey = options.contentKey ?? crypto.newContentKey()
     // Check the key before anything is encrypted or sent. The only length check used to live
     // in encodeFragment, which runs AFTER the share exists on the server — so a wrong-length
@@ -927,6 +1068,9 @@ class Shares {
     if (options.timedView !== undefined) body.timed_view = options.timedView
     if (itemKeyWrap !== undefined) body.item_key_wrap = itemKeyWrap
     if (options.organizationId !== undefined) body.organization_id = options.organizationId
+    if (options.notifyOn !== undefined && options.notifyOn.length > 0) {
+      body.notify_on = [...options.notifyOn]
+    }
 
     // Required by the API, not optional. A retried automation must not create a second copy
     // of a credential in the world, with its own link and audit trail, that the caller does
@@ -951,10 +1095,14 @@ class Shares {
    *
    * Use `iterateAll()` to walk every page.
    */
-  async list(options: { limit?: number; page?: number } = {}): Promise<SharePage> {
+  async list(
+    options: { limit?: number; page?: number; status?: ListStatus } = {},
+  ): Promise<SharePage> {
     const limit = options.limit ?? 25
     const page = options.page ?? 1
-    const data = await this.#client.request('GET', '/shares', { query: { limit, page } })
+    const data = await this.#client.request('GET', '/shares', {
+      query: listQuery(limit, page, options.status),
+    })
     const rows = (data.shares ?? data.data ?? []) as Array<Record<string, unknown>>
     return {
       shares: rows.map((row) => ({
@@ -975,11 +1123,87 @@ class Shares {
    * on the first page shorter than `limit`, which is a page the server is entitled to return
    * in the middle of a result set.
    */
-  async *iterateAll(options: { limit?: number } = {}): AsyncGenerator<ShareSummary> {
+  async *iterateAll(
+    options: { limit?: number; status?: ListStatus } = {},
+  ): AsyncGenerator<ShareSummary> {
+    listQuery(1, 1, options.status)
     yield* walkPages(async (page) => {
-      const batch = await this.list({ limit: options.limit ?? 100, page })
+      const batch = await this.list({ limit: options.limit ?? 100, page, status: options.status })
       return { rows: batch.shares, page: batch.page, hasMore: batch.hasMore }
     })
+  }
+
+  /**
+   * One page of a share's access log: who opened it, newest first, the history the app shows
+   * under Access History.
+   *
+   * Needs the `audit:read` scope, which `shares:read` does not include because the log carries
+   * recipients' IP addresses; without it this is a `PermissionError`. Only the share's creator
+   * can read the log, for a live share or one that has ended, and any other short code is a
+   * `NotFoundError`.
+   */
+  async accessLog(shortCode: string, options: AccessLogOptions = {}): Promise<AccessLogPage> {
+    const query = accessLogQuery(options)
+    const headers: Record<string, string> = {}
+    if (options.ifNoneMatch) headers['If-None-Match'] = options.ifNoneMatch
+    const reply = await this.#client[exchange](
+      'GET',
+      `/shares/${encodeURIComponent(shortCode)}/access-log`,
+      { query, headers },
+      true,
+    )
+    const data = reply.data
+    const rows = Array.isArray(data.entries) ? (data.entries as Array<Record<string, unknown>>) : []
+    const nextCursor =
+      typeof data.next_cursor === 'string' && data.next_cursor ? data.next_cursor : null
+    return {
+      shortCode:
+        typeof data.short_code === 'string' && data.short_code ? data.short_code : shortCode,
+      entries: rows.map((row) => ({
+        accessedAt: String(row.accessed_at ?? ''),
+        accessedIp: String(row.accessed_ip ?? ''),
+        platform: String(row.platform ?? ''),
+        userAgent: typeof row.user_agent === 'string' ? row.user_agent : null,
+        failedPasscode: row.failed_passcode === true,
+        signedIn: row.signed_in === true,
+      })),
+      nextCursor,
+      hasMore: nextCursor !== null,
+      retentionDays: countOf(data.retention_days),
+      effectiveFrom: typeof data.effective_from === 'string' ? data.effective_from : null,
+      effectiveTo: typeof data.effective_to === 'string' ? data.effective_to : null,
+      etag: reply.etag,
+      notModified: reply.notModified,
+    }
+  }
+
+  /**
+   * Every entry of a share's access log, newest first, following each page's `nextCursor`.
+   *
+   * `ifNoneMatch` is not taken: a walk reads every page, and a 304 on the first would end it
+   * having read nothing.
+   */
+  async *iterateAccessLog(
+    shortCode: string,
+    options: Omit<AccessLogOptions, 'ifNoneMatch'> = {},
+  ): AsyncGenerator<AccessLogEntry> {
+    let cursor = options.cursor
+    for (let pages = 1; ; pages++) {
+      if (pages > MAX_PAGES) {
+        throw new ApiError(`the access log did not end within ${MAX_PAGES} pages`)
+      }
+      const page = await this.accessLog(shortCode, { ...options, cursor, ifNoneMatch: undefined })
+      yield* page.entries
+      if (page.nextCursor === null) return
+      // A cursor that does not move would repeat the same page forever.
+      if (page.nextCursor === cursor) {
+        throw new ApiError(
+          'the access log returned the cursor it was given, so paging cannot be trusted to ' +
+            'terminate',
+        )
+      }
+      cursor = page.nextCursor
+    }
   }
 
   /**
@@ -1132,10 +1356,14 @@ class Requests {
    *
    * Use `iterateAll()` to walk every page.
    */
-  async list(options: { limit?: number; page?: number } = {}): Promise<RequestPage> {
+  async list(
+    options: { limit?: number; page?: number; status?: ListStatus } = {},
+  ): Promise<RequestPage> {
     const limit = options.limit ?? 25
     const page = options.page ?? 1
-    const data = await this.#client.request('GET', '/requests', { query: { limit, page } })
+    const data = await this.#client.request('GET', '/requests', {
+      query: listQuery(limit, page, options.status),
+    })
     const rows = (data.requests ?? data.data ?? []) as Array<Record<string, unknown>>
     return {
       requests: rows.map(requestSummaryOf),
@@ -1150,9 +1378,12 @@ class Requests {
    * hand-rolled version stops on the first page shorter than `limit`, which is a page the
    * server is entitled to return in the middle of a result set.
    */
-  async *iterateAll(options: { limit?: number } = {}): AsyncGenerator<RequestSummary> {
+  async *iterateAll(
+    options: { limit?: number; status?: ListStatus } = {},
+  ): AsyncGenerator<RequestSummary> {
+    listQuery(1, 1, options.status)
     yield* walkPages(async (page) => {
-      const batch = await this.list({ limit: options.limit ?? 100, page })
+      const batch = await this.list({ limit: options.limit ?? 100, page, status: options.status })
       return { rows: batch.requests, page: batch.page, hasMore: batch.hasMore }
     })
   }
@@ -1314,6 +1545,144 @@ class StatsClient {
       })),
     }
   }
+}
+
+/** What the credential may do: `crs.capabilities.get()`. No scope is needed. */
+class CapabilitiesClient {
+  readonly #client: CredenShare
+
+  constructor(client: CredenShare) {
+    this.#client = client
+  }
+
+  /**
+   * The key's scopes and rate limit, its plan (the team's for a team key), the plan's limits
+   * and features, the team's sharing policy, and the lists the API accepts.
+   *
+   * Pass an earlier `etag` as `ifNoneMatch`: an unchanged answer comes back with `notModified`
+   * set rather than as an error.
+   */
+  async get(options: { ifNoneMatch?: string } = {}): Promise<Capabilities> {
+    const headers: Record<string, string> = {}
+    if (options.ifNoneMatch) headers['If-None-Match'] = options.ifNoneMatch
+    const reply = await this.#client[exchange]('GET', '/capabilities', { headers }, true)
+    const data = reply.data
+    const key = objectOf(data.key)
+    const plan = objectOf(data.plan)
+    const limits = objectOf(data.limits)
+    const features: Record<string, boolean> = {}
+    for (const [name, on] of Object.entries(objectOf(data.features))) features[name] = on === true
+    const policy = data.sharing_policy
+    return {
+      apiVersion: String(data.api_version ?? ''),
+      key: {
+        keyId: String(key.key_id ?? ''),
+        scopes: stringsOf(key.scopes),
+        custodyLevel: countOf(key.custody_level),
+        organizationId:
+          typeof key.organization_id === 'string' && key.organization_id
+            ? key.organization_id
+            : null,
+        rateLimitRpm: countOf(key.rate_limit_rpm),
+      },
+      plan: { code: String(plan.code ?? ''), name: String(plan.name ?? '') },
+      limits: {
+        maxShares: countOf(limits.max_shares),
+        remainingShares: countOf(limits.remaining_shares),
+        maxFields: countOf(limits.max_fields),
+        maxDaysAccessLogs: countOf(limits.max_days_access_logs),
+        maxApiKeys: countOf(limits.max_api_keys),
+        maxWebhooks: countOf(limits.max_webhooks),
+      },
+      features,
+      sharingPolicy:
+        policy && typeof policy === 'object' && !Array.isArray(policy)
+          ? (policy as Record<string, unknown>)
+          : null,
+      fieldTypes: stringsOf(data.field_types),
+      notifyOnEvents: stringsOf(data.notify_on_events),
+      etag: reply.etag,
+      notModified: reply.notModified,
+    }
+  }
+}
+
+function objectOf(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {}
+}
+
+function stringsOf(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : []
+}
+
+/**
+ * The API's rule for `notify_on` (at most four, no repeats, each a known event) applied before
+ * anything is encrypted, so a typo is refused here rather than after a share is sent.
+ */
+function validateNotifyOn(events: readonly string[] | undefined): void {
+  if (events === undefined) return
+  if (!Array.isArray(events)) throw new InvalidArgumentError('notifyOn is a list of events')
+  const seen = new Set<string>()
+  for (const event of events) {
+    if (!(NOTIFY_ON_EVENTS as readonly string[]).includes(event)) {
+      throw new InvalidArgumentError(
+        `notifyOn ${JSON.stringify(event)} is not one of ${NOTIFY_ON_EVENTS.join(', ')}`,
+      )
+    }
+    if (seen.has(event)) {
+      throw new InvalidArgumentError(`notifyOn lists ${JSON.stringify(event)} twice`)
+    }
+    seen.add(event)
+  }
+}
+
+/** A list's query. `status` goes out only when asked for, so `list()` sends what it always has. */
+function listQuery(
+  limit: number,
+  page: number,
+  status: ListStatus | undefined,
+): Record<string, string | number> {
+  if (status !== undefined && status !== 'active' && status !== 'expired') {
+    throw new InvalidArgumentError(
+      `a list status is "active" or "expired", not ${JSON.stringify(status)}`,
+    )
+  }
+  return status === undefined ? { limit, page } : { limit, page, status }
+}
+
+function accessLogQuery(options: AccessLogOptions): Record<string, string | number> {
+  const query: Record<string, string | number> = {}
+  if (options.limit !== undefined) {
+    if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 100) {
+      throw new InvalidArgumentError(`an access log limit is 1 to 100, got ${options.limit}`)
+    }
+    query.limit = options.limit
+  }
+  if (options.cursor) query.cursor = options.cursor
+  const from = timeOf(options.from)
+  const to = timeOf(options.to)
+  if (from !== undefined && to !== undefined && Date.parse(from) > Date.parse(to)) {
+    throw new InvalidArgumentError("the access log's from is after its to")
+  }
+  if (from !== undefined) query.from = from
+  if (to !== undefined) query.to = to
+  return query
+}
+
+/** A Date as RFC 3339 in UTC without milliseconds; a string as given. */
+function timeOf(value: string | Date | undefined): string | undefined {
+  if (value === undefined) return undefined
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) {
+      throw new InvalidArgumentError('an access log time is an invalid Date')
+    }
+    return value.toISOString().replace(/\.\d{3}Z$/, 'Z')
+  }
+  return value
 }
 
 /**

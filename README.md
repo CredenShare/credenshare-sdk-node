@@ -91,6 +91,17 @@ await crs.shares.create({
 })
 ```
 
+## Activity emails
+
+```ts
+await crs.shares.create({ title: 'Deploy key', fields, notifyOn: ['viewed', 'denied'] })
+```
+
+`notifyOn` emails the share's creator when it is viewed, when a view is refused, when it
+expires or when it is deleted: any of `viewed`, `denied`, `expired` and `deleted`
+(`NOTIFY_ON_EVENTS`), each at most once, the same choice as the app's "Email me when". An
+unknown or repeated event throws `InvalidArgumentError` before anything is encrypted or sent.
+
 ## Listing and expiring
 
 ```ts
@@ -102,7 +113,15 @@ for await (const row of crs.shares.iterateAll()) {
 }
 
 await crs.shares.expire('aB3dEf12')
+
+// Shares that have ended, by date, views or deletion, newest expiry first.
+const ended = await crs.shares.list({ status: 'expired' })
+for await (const row of crs.shares.iterateAll({ status: 'expired' })) { /* ... */ }
 ```
+
+`crs.requests.list` and `iterateAll` take `status` too: the expired list is the requests that
+have closed, and a deleted request is in neither. Without `status`, both read the active list
+and send what they always have.
 
 `list` and `get` return **metadata only** — never content, never a key. A short code
 belonging to another account reports exactly as one that does not exist, so a credential
@@ -292,6 +311,80 @@ Absent figures read as `0` and an absent series as `[]`, never as `undefined` �
 has to tell "no data" from "field missing" apart will get it wrong, and a new account genuinely
 has no views yet.
 
+## Who opened a share
+
+```ts
+const page = await crs.shares.accessLog('aB3dEf12', { limit: 50 })
+for (const e of page.entries) {          // newest first
+  console.log(e.accessedAt, e.accessedIp, e.platform, e.failedPasscode, e.signedIn)
+}
+
+for await (const e of crs.shares.iterateAccessLog('aB3dEf12', { from: new Date(Date.now() - 7 * 864e5) })) {
+  /* ... */
+}
+```
+
+The access log the app shows under Access History. It needs the `audit:read` scope, which
+`shares:read` does not include because the log carries recipients' IP addresses. Only the
+share's creator can read it, for a live share or one that has ended; any other short code is a
+`NotFoundError`.
+
+Pages are cursor-based: `iterateAccessLog` follows `nextCursor` to the end, and `accessLog`
+with `cursor` reads one page further back. `from` and `to` take RFC 3339 strings or Dates. The
+plan's retention applies whatever `from` says, and `retentionDays`, `effectiveFrom` and
+`effectiveTo` report the window used.
+
+Each page carries a weak `etag`. Pass it back as `ifNoneMatch` and an unchanged page returns
+with `notModified: true` rather than throwing. The window's ends default to the current time,
+so an unchanged page is only likely when both `from` and `to` are set.
+
+`userAgent` is the raw user agent, `null` when none was recorded; link previews and scanners
+show up there. `signedIn` says whether the viewer was signed in, not who they were.
+
+## Capabilities
+
+```ts
+const caps = await crs.capabilities.get()
+console.log(caps.plan.name, caps.key.scopes, caps.limits.remainingShares)
+if (caps.features.secure_requests) { /* ... */ }
+```
+
+What this credential may do: its scopes and rate limit, its plan (the team's for a team key),
+the plan's limits and features, and the lists the API accepts. No scope is needed. In
+`limits`, `UNLIMITED` (-1) means the plan sets none. `sharingPolicy` is the team's sharing
+policy for a team key, so it can be met before creating anything, and `null` for a personal
+key. `etag` and `ifNoneMatch` work as they do for the access log.
+
+## Generating a password, passphrase or PIN
+
+```ts
+import { generatePassword, generatePassphrase, generatePin } from '@credenshare/sdk'
+
+const password = generatePassword()                              // 20 characters
+const phrase = generatePassphrase({ words: 6, separator: 'space' })
+const pin = generatePin({ length: 8 })
+console.log(phrase.bits, phrase.strength)                         // 77.5… 'Strong'
+```
+
+Generated on this machine, with nothing sent anywhere: the app's three modes, with the same
+character sets and the same strength figures.
+
+- **Password:** 8 to 128 characters (default 20) from upper and lower case, numbers and the
+  symbols ``!@#$%^&*()_+-=[]{}|;:,.<>?`"~/\'``, any set switched off with `uppercase`,
+  `lowercase`, `numbers` or `symbols: false`, and any characters left out with `exclude`.
+- **Passphrase:** 3 to 12 words (default 5) from the EFF long word list, 7,776 words, joined
+  by `hyphen` (the default), `space`, `period`, `underscore` or `none`. `capitalize`
+  upper-cases each word; `includeNumber` adds one digit to one word.
+- **PIN:** 4 to 12 digits (default 6).
+
+Every draw is uniform: `crypto.getRandomValues` with rejection sampling, where reducing a random
+value with `%` would favour some characters. `bits` is the entropy of what the options generate:
+length times log2 of the pool for a password, words times log2(7,776) for a passphrase, plus
+log2(10) and log2(words) for the digit. `strength` is Weak below 40 bits, Fair below 60, Strong
+below 80 and Very Strong from there, as the app labels it. Out-of-range options throw
+`InvalidArgumentError` rather than being adjusted. Printing, inspecting or `JSON.stringify`-ing
+a `Generated` withholds its `value`.
+
 ## Idempotency and retries
 
 Every create carries an `Idempotency-Key`. It exists so a **network** retry cannot leave a
@@ -437,6 +530,7 @@ fixes:
 | `DeliveryUnknownError` | delivered, but no response was read | it may have committed. Repeat the identical request — a fresh key here is how one secret becomes two |
 | `IdempotencyInFlightError` | the identical request is still running | wait briefly, then repeat it unchanged |
 | `InvalidFieldError` | a field is not `{ key, value, type }`, or a request prompt is not `{ item }` | a share labels its field `key`; a request prompt is `item`. Not `label`, `name` or `title` |
+| `InvalidArgumentError` | an argument was refused before anything was sent or generated | a `notifyOn` event, a list status, access-log options or generator options out of range |
 | `RequestSeedTransmittedError` | a request seed was about to be sent | expire that request and create a new one; a seed that reached the server is no longer zero-knowledge |
 | `NotFoundError` | no such share or request, or not yours | a code from another account reads exactly like one that never existed |
 | `ApiError` | any other refusal | the base class — `err.status`, `err.code`, `err.requestId` carry the detail |
