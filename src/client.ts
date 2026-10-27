@@ -39,7 +39,7 @@ export const DEFAULT_LINK_ORIGIN = 'https://crs.sh'
  * User-Agent then drifted the same way on its own, still reporting `0.1.0` at 0.1.4. One
  * constant, re-exported from `index.ts`, and a test asserts it equals `package.json`.
  */
-export const VERSION = '0.4.0'
+export const VERSION = '0.5.0'
 
 /**
  * The only accepted encryption type. Plaintext creates are refused by the server, and this
