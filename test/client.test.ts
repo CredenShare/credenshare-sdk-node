@@ -284,7 +284,12 @@ describe('retries', () => {
       return new Response(JSON.stringify({ short_code: 'xy12' }), { status: 201 })
     }) as unknown as typeof globalThis.fetch
 
-    const share = await new CredenShare(CREDENTIAL, { fetch: fetchImpl }).shares.create({
+    // A configured origin, so the one /v1/capabilities question an unconfigured client asks
+    // after its first create (Gitea #412) does not join the two attempts counted here.
+    const share = await new CredenShare(CREDENTIAL, {
+      fetch: fetchImpl,
+      linkOrigin: 'https://crs.sh',
+    }).shares.create({
       title: 't',
       fields: [FIELD],
     })

@@ -355,6 +355,27 @@ the plan's limits and features, and the lists the API accepts. No scope is neede
 policy for a team key, so it can be met before creating anything, and `null` for a personal
 key. `etag` and `ifNoneMatch` work as they do for the access log.
 
+## Links on a team's own domain
+
+```ts
+const crs = new CredenShare(teamCredential)
+const share = await crs.shares.create({ title, fields }) // https://links.example.com/aB3dEf12#1...
+console.log(await crs.linkOrigin())                      // the origin this client builds links on
+```
+
+A team can serve its links from its own domain. A client with no `linkOrigin` option asks the
+API once, on its first create, and builds every link on the team's domain when the credential is
+a team key whose team has one live for new links. A personal key's links, and those of a team
+without a domain, stay on `https://crs.sh`: a team's domain serves only that team's shares and
+requests.
+
+Pass `linkOrigin` to choose the origin yourself, and nothing is asked. The answer is kept for the
+life of the client, a "none" included, and a failed question leaves the client on the default
+rather than failing the create. Only a bare `https://` origin is followed, since the content key
+goes into the links built on it. `linkFor`, `collectLinkFor` and `accessLinkFor` use the team's
+domain once the client has learned it, and `capabilities.get()` returns the same value as
+`linkOrigin`.
+
 ## Generating a password, passphrase or PIN
 
 ```ts

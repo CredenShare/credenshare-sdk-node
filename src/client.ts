@@ -434,6 +434,11 @@ export interface Capabilities {
   sharingPolicy: Record<string, unknown> | null
   fieldTypes: string[]
   notifyOnEvents: string[]
+  /**
+   * The team's custom domain, such as `https://links.example.com`, for a team key whose team has
+   * one live for new links; null otherwise. The client uses it when `linkOrigin` is not set.
+   */
+  linkOrigin: string | null
   etag: string | null
   /** The API answered 304 to `ifNoneMatch`; nothing but `etag` is set. */
   notModified: boolean
@@ -777,6 +782,12 @@ export interface Stats {
 
 export interface ClientOptions {
   baseUrl?: string
+  /**
+   * Where recipient links are built, such as `https://crs.sh`. Set, it is used as given. Left
+   * out, the client asks the API once, on its first create, and uses the team's custom domain
+   * when the credential is a team key whose team has one; otherwise, or when that question
+   * fails, `DEFAULT_LINK_ORIGIN`. See `CredenShare.linkOrigin()`.
+   */
   linkOrigin?: string
   timeoutMs?: number
   maxRetries?: number
@@ -795,11 +806,41 @@ interface Exchanged {
 }
 
 const exchange = Symbol('exchange')
+const resolveLinkOrigin = Symbol('resolveLinkOrigin')
+
+/**
+ * `raw` as `https://host[:port]` when it is exactly that, and '' for anything else. The content
+ * key goes into links built on this origin, so an answer that is not a plain https origin is not
+ * followed.
+ */
+function bareHttpsOrigin(raw: string | null): string {
+  if (!raw) return ''
+  let url: URL
+  try {
+    url = new URL(raw.replace(/\/+$/, ''))
+  } catch {
+    return ''
+  }
+  const bare =
+    url.protocol === 'https:' &&
+    url.host !== '' &&
+    url.username === '' &&
+    url.password === '' &&
+    url.pathname === '/' &&
+    url.search === '' &&
+    url.hash === '' &&
+    !raw.replace(/\/+$/, '').slice('https://'.length).includes('/')
+  return bare ? `https://${url.host}` : ''
+}
 
 export class CredenShare {
   readonly credential: Credential
   readonly #baseUrl: string
-  readonly #linkOrigin: string
+  /** As configured; null when it was not. */
+  readonly #linkOrigin: string | null
+  /** The team's custom domain from /v1/capabilities: undefined until asked, '' for none. */
+  #teamOrigin: string | undefined
+  #teamOriginAsked: Promise<void> | null = null
   readonly #timeoutMs: number
   readonly #maxRetries: number
   readonly #fetch: typeof globalThis.fetch
@@ -812,7 +853,8 @@ export class CredenShare {
   constructor(credential: string, options: ClientOptions = {}) {
     this.credential = Credential.parse(credential)
     this.#baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '')
-    this.#linkOrigin = (options.linkOrigin ?? DEFAULT_LINK_ORIGIN).replace(/\/+$/, '')
+    this.#linkOrigin =
+      options.linkOrigin === undefined ? null : options.linkOrigin.replace(/\/+$/, '')
     this.#timeoutMs = options.timeoutMs ?? 30_000
     this.#maxRetries = Math.max(0, options.maxRetries ?? DEFAULT_MAX_RETRIES)
     this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis)
@@ -829,7 +871,7 @@ export class CredenShare {
    * the link readable by its holder and opaque to us.
    */
   linkFor(shortCode: string, contentKey: Uint8Array): string {
-    return `${this.#linkOrigin}/${shortCode}#${crypto.encodeFragment(contentKey)}`
+    return `${this.#origin()}/${shortCode}#${crypto.encodeFragment(contentKey)}`
   }
 
   /**
@@ -839,7 +881,7 @@ export class CredenShare {
    * which is what makes it safe to paste into a ticket. `accessLinkFor` is the other half.
    */
   collectLinkFor(shortCode: string): string {
-    return `${this.#linkOrigin}/r/${shortCode}`
+    return `${this.#origin()}/r/${shortCode}`
   }
 
   /**
@@ -851,7 +893,43 @@ export class CredenShare {
    * never ours. Useful for turning a seed you stored at create time back into a link.
    */
   accessLinkFor(shortCode: string, seed: Uint8Array): string {
-    return `${this.#linkOrigin}/r/${shortCode}#${crypto.encodeFragment(seed)}`
+    return `${this.#origin()}/r/${shortCode}#${crypto.encodeFragment(seed)}`
+  }
+
+  /**
+   * The origin this client builds links on: `linkOrigin` when it was configured; otherwise the
+   * team's custom domain when the credential is a team key whose team has one live for new
+   * links; otherwise `DEFAULT_LINK_ORIGIN`.
+   *
+   * The custom domain is read from /v1/capabilities at most once per client, on the first call
+   * to this method or to a create, and the answer is kept, a "none" included. A failed read
+   * leaves this client on the default rather than failing anything. A team's domain serves only
+   * that team's shares and requests, which is why only a team key ever gets one.
+   */
+  async linkOrigin(): Promise<string> {
+    await this[resolveLinkOrigin]()
+    return this.#origin()
+  }
+
+  /** What is known now, without asking. */
+  #origin(): string {
+    if (this.#linkOrigin !== null) return this.#linkOrigin
+    if (this.#teamOrigin) return this.#teamOrigin
+    return DEFAULT_LINK_ORIGIN
+  }
+
+  /** Asks the API for the team's domain once; the creates call it. Never throws. */
+  async [resolveLinkOrigin](): Promise<void> {
+    if (this.#linkOrigin !== null) return
+    this.#teamOriginAsked ??= this.capabilities.get().then(
+      (caps) => {
+        this.#teamOrigin = bareHttpsOrigin(caps.linkOrigin)
+      },
+      () => {
+        this.#teamOrigin = ''
+      },
+    )
+    await this.#teamOriginAsked
   }
 
   /**
@@ -1080,6 +1158,7 @@ class Shares {
 
     const data = await this.#client.request('POST', '/shares', { body, headers })
     const shortCode = String(data.short_code)
+    await this.#client[resolveLinkOrigin]()
     return new Share({
       shortCode,
       link: this.#client.linkFor(shortCode, contentKey),
@@ -1340,6 +1419,7 @@ class Requests {
     })
 
     const shortCode = String(data.short_code)
+    await this.#client[resolveLinkOrigin]()
     return new SecureRequest({
       shortCode,
       seed,
@@ -1601,6 +1681,8 @@ class CapabilitiesClient {
           : null,
       fieldTypes: stringsOf(data.field_types),
       notifyOnEvents: stringsOf(data.notify_on_events),
+      linkOrigin:
+        typeof data.link_origin === 'string' && data.link_origin ? data.link_origin : null,
       etag: reply.etag,
       notModified: reply.notModified,
     }
